@@ -8,8 +8,8 @@
 8. ~/SOTA/MCTrack$ python evaluation/static_evaluation/nuscenes/eval.py results/nuscenes/mctrack_custom/results.json 필터링된 결과를 MCTrack 내부 평가 툴킷으로 성능평가
 
    
-<현재 tracker 성능(Updated 25.04.10)>
-### Final results (Before Hungarian Matching)
+< 현재 tracker 성능 >
+### Final results (Updated 25.04.10)
 
 | Class     | AMOTA | AMOTP | RECALL | MOTAR | GT        | MOTA  | MOTP  | MT   | ML  | FAF  | TP     | FP     | FN     | IDS | FRAG | TID  | LGD  |
 |-----------|-------|-------|--------|--------|-----------|-------|-------|------|-----|------|--------|--------|--------|-----|------|------|------|
@@ -44,7 +44,7 @@
 
 
 
-<참고>
+< 참고 >
 mctrack_tracker_node_base.py >  칼만필터만 적용된 베이스 트래커, 성능은 이하와 같음
 ### Final results
 
