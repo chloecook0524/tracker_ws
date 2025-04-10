@@ -50,4 +50,4 @@ mctrack_tracker_node_base.py >  칼만필터만 적용된 베이스 트래커
 
 
 
-mctrack_tracker_node.py 수정하면서 성능 높이면 될 듯. 하지만! mctrack 의 핵심특징을 코드에 적용하면 갑자기 검지마저 안되길래ㅜㅜ 이것저것 단계별로 붙이면서 원인 파악중
+mctrack_tracker_node.py 수정하면서 성능 높이면 될 듯
