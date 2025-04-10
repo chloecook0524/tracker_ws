@@ -7,6 +7,42 @@
 7. ~/tracker_ws/src/mctrack_tracker/scripts$ python filter_results.py   --input ~/nuscenes_tracking_results.json   --output ~/SOTA/MCTrack/results/nuscenes/mctrack_custom/results.json 트래킹 결과 MCTrack 평가기준에 맞춰 필터링
 8. ~/SOTA/MCTrack$ python evaluation/static_evaluation/nuscenes/eval.py results/nuscenes/mctrack_custom/results.json 필터링된 결과를 MCTrack 내부 평가 툴킷으로 성능평가
 
+   
+<현재 tracker 성능(Updated 25.04.10)>
+### Final results (Before Hungarian Matching)
+
+| Class     | AMOTA | AMOTP | RECALL | MOTAR | GT        | MOTA  | MOTP  | MT   | ML  | FAF  | TP     | FP     | FN     | IDS | FRAG | TID  | LGD  |
+|-----------|-------|-------|--------|--------|-----------|-------|-------|------|-----|------|--------|--------|--------|-----|------|------|------|
+| bicycle   | 0.643 | 0.354 | 0.849  | 0.779  | 19930.657 | 0.004 | 97    | 11   | 25.4 | 1681 | 371300 | 12     | 9      | 0.76| 0.81 |
+| bus       | 0.645 | 0.502 | 0.808  | 0.860  | 21120.679 | 0.002 | 69    | 18   | 15.2 | 1666 | 233406 | 40     | 21     | 0.85| 1.55 |
+| car       | 0.573 | 0.506 | 0.805  | 0.763  | 58317     | 0.600 | 0.008 | 2304 | 544  | 188.5| 45870  | 10853  | 11373  |1074 | 477  | 0.77 | 1.04 |
+| motorcy   | 0.492 | 0.566 | 0.785  | 0.679  | 19770.510 | 0.022 | 78    | 20   | 35.0 | 1486 | 477426 | 65     | 29     | 0.77| 1.02 |
+| pedestr   | 0.689 | 0.402 | 0.895  | 0.810  | 25423     | 0.711 | 0.120 | 1272 | 75   | 97.4 | 22309  | 4237   | 2662   | 452 | 265  | 0.60 | 0.66 |
+| trailer   | 0.746 | 0.254 | 0.923  | 0.852  | 24250.772 | 0.005 | 107   | 12   | 32.9 | 2198 | 325186 | 41     | 21     | 0.45| 0.56 |
+| truck     | 0.734 | 0.352 | 0.867  | 0.890  | 96500.764 | 0.003 | 397   | 68   | 25.1 | 8281 | 9131282| 87     | 57     | 0.56| 0.74 |
+
+**Aggregated results:**
+
+- **AMOTA**: 0.646
+- **AMOTP**: 0.419
+- **RECALL**: 0.847
+- **MOTAR**: 0.805
+- **GT**: 14556
+- **MOTA**: 0.670
+- **MOTP**: 0.023
+- **MT**: 4324
+- **ML**: 748
+- **FAF**: 59.9
+- **TP**: 83491
+- **FP**: 17409
+- **FN**: 16635
+- **IDS**: 1771
+- **FRAG**: 879
+- **TID**: 0.68
+- **LGD**: 0.91
+- **Eval time**: 96.1s
+
+
 
 <참고>
 mctrack_tracker_node_base.py >  칼만필터만 적용된 베이스 트래커, 성능은 이하와 같음
