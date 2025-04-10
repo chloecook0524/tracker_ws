@@ -1,0 +1,12 @@
+<launch>
+  <node pkg="mctrack_tracker" type="tracking_logger.py" name="logger" output="screen">
+    <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json" />
+  </node>
+
+  <node pkg="mctrack_tracker" type="mctrack_tracker_node.py" name="tracker_node" output="screen" />
+
+  <node pkg="mctrack_tracker" type="nuscenes_detection_replayer.py" name="gt_replayer" output="screen" required="true">
+    <param name="loop" value="false" />
+  </node>
+</launch>
+

@@ -1,0 +1,19 @@
+# ROS build artifacts
+build/
+devel/
+install/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ROS logs
+*.log
+log/
+
+# vscode, pycharm 설정 등
+.vscode/
+.idea/
+
+# 기타
+*.swp
