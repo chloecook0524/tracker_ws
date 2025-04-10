@@ -47,4 +47,4 @@ Rendering curves
 >>> main() completed
 
 mctrack_tracker_node.py 수정하면서 성능 높이면 될 듯
-하지만! mctrack 의 핵심특징을 코드에 적용하면 갑자기 나머지들도 검출을 못해서 이것저것 단계별로 붙이면서 원인 파악중
+하지만! mctrack 의 핵심특징을 코드에 적용하면 갑자기 검지마저 안되길래 이것저것 단계별로 붙이면서 원인 파악중
