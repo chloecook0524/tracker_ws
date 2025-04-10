@@ -3,7 +3,6 @@ import rospy
 import numpy as np
 import uuid
 from std_msgs.msg import Header, Float32
-from scipy.optimize import linear_sum_assignment
 from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
 from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
 
@@ -22,6 +21,11 @@ def iou_2d(box1, box2):
     union_area = w1 * l1 + w2 * l2 - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
 
+class TrackState:
+    TENTATIVE = 1
+    CONFIRMED = 2
+    DELETED = 3
+
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
         self.id = obj_id or uuid.uuid4().int % 65536
@@ -36,6 +40,8 @@ class KalmanTrackedObject:
         self.missed_count = 0
         self.last_update = rospy.Time.now().to_sec()
         self.hits = 1
+        self.state = TrackState.TENTATIVE
+        self.confirm_threshold = 3
 
     def predict(self, dt):
         self.x += self.vx * dt * np.cos(self.yaw)
@@ -64,11 +70,12 @@ class KalmanTrackedObject:
         self.label = detection['type']
         self.last_update = rospy.Time.now().to_sec()
         self.missed_count = 0
-        self.hits += 1 
+        self.hits += 1
+        if self.hits >= self.confirm_threshold:
+            self.state = TrackState.CONFIRMED
 
     def tracking_score(self):
         return max(0.1, min(1.0, self.hits / (self.age + 1e-6)))
-
 
 class KalmanMultiObjectTracker:
     def __init__(self):
@@ -92,8 +99,6 @@ class KalmanMultiObjectTracker:
                 iou = iou_2d(track.size, det['size'])
                 yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
 
-                # print(f"[MATCHING DEBUG] Track {track.id} ↔ Det | dist: {dist:.2f}, iou: {iou:.3f}, yaw_sim: {yaw_sim:.3f}")
-
                 if dist < 3.0 and iou > 0.01:
                     score = (1.0 / (dist + 1e-6)) + iou + yaw_sim
                     if score > best_score:
@@ -108,25 +113,20 @@ class KalmanMultiObjectTracker:
             self.tracks.append(KalmanTrackedObject(det))
 
         self.tracks = [t for t in self.tracks if (now - t.last_update < 2.0 and t.missed_count <= 5)]
-    
-    def compensate_ego_motion(self, dx, dy):
-        for track in self.tracks:
-            track.x += dx
-            track.y += dy
 
     def get_tracks(self):
         result = []
         for t in self.tracks:
-            # print(f"[TRACK DEBUG] ID: {t.id} | label: {t.label} | hits: {t.hits} | age: {t.age:.2f} | score: {t.tracking_score():.2f}")
-            result.append({
-                "id": t.id,
-                "x": t.x,
-                "y": t.y,
-                "yaw": t.yaw,
-                "size": t.size,
-                "confidence": t.tracking_score(),
-                "type": t.label
-            })
+            if t.state == TrackState.CONFIRMED:
+                result.append({
+                    "id": t.id,
+                    "x": t.x,
+                    "y": t.y,
+                    "yaw": t.yaw,
+                    "size": t.size,
+                    "confidence": t.tracking_score(),
+                    "type": t.label
+                })
         return result
 
 class MCTrackTrackerNode:
@@ -166,12 +166,6 @@ class MCTrackTrackerNode:
                 "type": obj.label,
             }
             detections.append(det)
-
-        dx = -self.ego_vel * dt * np.cos(self.ego_yaw_rate * dt)
-        dy = -self.ego_vel * dt * np.sin(self.ego_yaw_rate * dt)
-        # self.tracker.compensate_ego_motion(dx, dy)
-        # rospy.logwarn(f"[EGO MOTION] dx: {dx:.2f}, dy: {dy:.2f}, vel: {self.ego_vel:.2f}, yaw_rate: {self.ego_yaw_rate:.2f}, dt: {dt:.2f}")
-
 
         self.tracker.predict(dt)
         self.tracker.update(detections, dt)
