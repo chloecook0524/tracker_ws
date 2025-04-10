@@ -40,7 +40,6 @@ def main():
     rospy.init_node("nuscenes_gt_publisher")
     rospy.loginfo(">>> Node initialized successfully")
 
-    # ✅ Use val split GT
     json_path = "/home/chloe/nuscenes_gt_valsplit.json"
     if not os.path.exists(json_path):
         rospy.logerr(f"GT JSON file does not exist at: {json_path}")
@@ -54,21 +53,23 @@ def main():
     pub_det = rospy.Publisher("/lidar_detection", LidarPerceptionOutput, queue_size=10)
     pub_vel = rospy.Publisher("/ego_vel_x", Float32, queue_size=1)
     pub_yawrate = rospy.Publisher("/ego_yaw_rate", Float32, queue_size=1)
+
     rospy.loginfo("⏳ Waiting for subscribers to connect...")
     while (pub_det.get_num_connections() == 0 or
            pub_vel.get_num_connections() == 0 or
            pub_yawrate.get_num_connections() == 0) and not rospy.is_shutdown():
         rospy.sleep(0.1)
     rospy.loginfo("✅ All subscribers connected. Starting replay.")
-    
-    rate = rospy.Rate(10.0)
 
+    rate = rospy.Rate(10.0)
     results = data["results"]
-    sample_tokens = sorted(results.keys())
+    ego_poses = data.get("ego_poses", {})
+    timestamps = data["timestamps"]
+    sample_tokens = sorted(results.keys(), key=lambda tok: timestamps.get(tok, 0))
     rospy.loginfo(f"Found {len(sample_tokens)} sample tokens.")
 
-    last_x, last_y, last_yaw, last_ts = None, None, None, None
-    timestamps = np.linspace(0.0, len(sample_tokens) / 3.0, num=len(sample_tokens))
+    last_pose = None
+    last_ts = None
     start_time = rospy.Time.now()
 
     for i, token in enumerate(sample_tokens):
@@ -76,26 +77,37 @@ def main():
             break
 
         objects = results[token]
-
         msg = LidarPerceptionOutput()
         msg.header = Header()
         msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = token
 
-        if len(objects) > 0:
-            ref_obj = objects[0]
-            cur_x = ref_obj["translation"][0]
-            cur_y = ref_obj["translation"][1]
-            cur_yaw = quaternion_to_yaw(ref_obj["rotation"])
-            cur_ts = timestamps[i]
+        # === Ego pose 기반 velocity, yaw rate 계산
+        if token in ego_poses:
+            cur_pose_raw = ego_poses[token]
+            cur_x = cur_pose_raw["translation"][0]
+            cur_y = cur_pose_raw["translation"][1]
+            cur_yaw = quaternion_to_yaw(cur_pose_raw["rotation"])
+            cur_ts = timestamps[token]
 
-            if last_x is not None:
+            if last_pose is not None:
                 dt = cur_ts - last_ts
-                vel_x = (cur_x - last_x) / dt if dt > 0 else 0.0
-                yaw_rate = (cur_yaw - last_yaw) / dt if dt > 0 else 0.0
+                if dt <= 0:
+                    rospy.logwarn(f"[EGO DEBUG] ⚠️ Non-positive dt detected: {dt:.6f}. Skipping frame.")
+                    continue
+                dx = cur_x - last_pose["x"]
+                dy = cur_y - last_pose["y"]
+                dyaw = cur_yaw - last_pose["yaw"]
+
+                vel_x = np.hypot(dx, dy) / dt if dt > 0 else 0.0
+                yaw_rate = dyaw / dt if dt > 0 else 0.0
+
+                # rospy.logwarn(f"[DEBUG EGO] dx={dx:.2f}, dy={dy:.2f}, dyaw={dyaw:.2f}, dt={dt:.4f}, vel={vel_x:.2f}, yaw_rate={yaw_rate:.2f}")
                 pub_vel.publish(vel_x)
                 pub_yawrate.publish(yaw_rate)
-            last_x, last_y, last_yaw, last_ts = cur_x, cur_y, cur_yaw, cur_ts
+
+            last_pose = {"x": cur_x, "y": cur_y, "yaw": cur_yaw}
+            last_ts = cur_ts
 
         for obj in objects:
             tracking_id = obj.get("tracking_id", "0")

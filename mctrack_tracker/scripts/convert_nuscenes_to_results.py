@@ -11,7 +11,6 @@ NUSC_ROOT = "/media/chloe/ec7602a4-b7fe-426f-bb59-0f9b8f98acb7"
 VERSION = "v1.0-trainval"
 OUTPUT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
 
-# === [ category_name → tracking_name 변환 함수 ] ===
 def convert_category_name_to_tracking_name(category_name):
     if category_name.startswith("vehicle.car"):
         return "car"
@@ -35,7 +34,6 @@ def convert_category_name_to_tracking_name(category_name):
         return "barrier"
     return None
 
-# === [ 변환 실행 함수 (val split only) ] ===
 def convert_val_gt_to_results_format():
     print(f"📦 Loading NuScenes from {NUSC_ROOT} ...")
     nusc = NuScenes(version=VERSION, dataroot=NUSC_ROOT)
@@ -44,15 +42,15 @@ def convert_val_gt_to_results_format():
 
     val_sample_tokens = set()
     for scene in nusc.scene:
-        if scene['name'] in val_scene_names:  # ✅ name 기준으로 비교
+        if scene['name'] in val_scene_names:
             sample_token = scene['first_sample_token']
             while sample_token:
                 val_sample_tokens.add(sample_token)
                 sample = nusc.get('sample', sample_token)
                 sample_token = sample['next'] if sample['next'] else None
 
-
     results = defaultdict(list)
+    ego_poses = dict()
     count_valid = 0
     skipped = 0
 
@@ -63,11 +61,8 @@ def convert_val_gt_to_results_format():
 
         category_name = ann.get("category_name", "")
         tracking_name = convert_category_name_to_tracking_name(category_name)
-
         if tracking_name is None:
             skipped += 1
-            if skipped <= 10:
-                print(f"⚠️ Skipped unknown category: {category_name}")
             continue
 
         box = {
@@ -80,19 +75,31 @@ def convert_val_gt_to_results_format():
             'tracking_name': tracking_name,
             'tracking_score': 1.0
         }
-
         results[ann['sample_token']].append(box)
         count_valid += 1
 
-    print(f"\n✅ Extracted {count_valid} valid annotations across {len(results)} val sample tokens")
-    print(f"⚠️ Skipped due to unrecognized category: {skipped}")
-    
+    timestamps = dict()
+    print("📍 Extracting ego_pose per sample token...")
+    for tok in tqdm(val_sample_tokens, desc="Ego pose"):
+        sample = nusc.get('sample', tok)
+        lidar_token = sample['data']['LIDAR_TOP']
+        lidar_data = nusc.get('sample_data', lidar_token)
+        ego_pose = nusc.get('ego_pose', lidar_data['ego_pose_token'])
+
+        ego_poses[tok] = {
+            "translation": ego_pose['translation'],
+            "rotation": ego_pose['rotation']
+        }
+        timestamps[tok] = lidar_data['timestamp'] / 1e6 
+
     for tok in val_sample_tokens:
         if tok not in results:
             results[tok] = []
 
     output = {
         'results': dict(results),
+        'ego_poses': ego_poses,
+        'timestamps': timestamps,
         'meta': {
             'use_camera': False,
             'use_lidar': True,
@@ -105,9 +112,9 @@ def convert_val_gt_to_results_format():
     with open(OUTPUT_JSON_PATH, 'w') as f:
         json.dump(output, f, indent=2)
 
-    print(f"✅ Saved val split results to {OUTPUT_JSON_PATH}")
+    print(f"\n✅ Extracted {count_valid} valid annotations")
+    print(f"⚠️ Skipped: {skipped}")
+    print(f"✅ Saved final output to: {OUTPUT_JSON_PATH}")
 
-
-# === [ 실행 ] ===
 if __name__ == "__main__":
     convert_val_gt_to_results_format()

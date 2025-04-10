@@ -92,6 +92,8 @@ class KalmanMultiObjectTracker:
                 iou = iou_2d(track.size, det['size'])
                 yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
 
+                # print(f"[MATCHING DEBUG] Track {track.id} ↔ Det | dist: {dist:.2f}, iou: {iou:.3f}, yaw_sim: {yaw_sim:.3f}")
+
                 if dist < 3.0 and iou > 0.01:
                     score = (1.0 / (dist + 1e-6)) + iou + yaw_sim
                     if score > best_score:
@@ -115,6 +117,7 @@ class KalmanMultiObjectTracker:
     def get_tracks(self):
         result = []
         for t in self.tracks:
+            # print(f"[TRACK DEBUG] ID: {t.id} | label: {t.label} | hits: {t.hits} | age: {t.age:.2f} | score: {t.tracking_score():.2f}")
             result.append({
                 "id": t.id,
                 "x": t.x,
@@ -166,7 +169,9 @@ class MCTrackTrackerNode:
 
         dx = -self.ego_vel * dt * np.cos(self.ego_yaw_rate * dt)
         dy = -self.ego_vel * dt * np.sin(self.ego_yaw_rate * dt)
-        self.tracker.compensate_ego_motion(dx, dy)
+        # self.tracker.compensate_ego_motion(dx, dy)
+        # rospy.logwarn(f"[EGO MOTION] dx: {dx:.2f}, dy: {dy:.2f}, vel: {self.ego_vel:.2f}, yaw_rate: {self.ego_yaw_rate:.2f}, dt: {dt:.2f}")
+
 
         self.tracker.predict(dt)
         self.tracker.update(detections, dt)
