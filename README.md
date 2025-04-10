@@ -8,8 +8,10 @@
 8. ~/SOTA/MCTrack$ python evaluation/static_evaluation/nuscenes/eval.py results/nuscenes/mctrack_custom/results.json 필터링된 결과를 MCTrack 내부 평가 툴킷으로 성능평가
 
 
+
+
 <현재문제>
-mctrack_tracker_node_base.py >  칼만필터만 적용된 기본 트래커 (성능 바닥)
+mctrack_tracker_node_base.py >  칼만필터만 적용된 기본 트래커로 성능 바닥 상태. 
 아래는 해당 트래커 결과
 ### Final results
 
