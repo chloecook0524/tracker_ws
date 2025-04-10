@@ -9,7 +9,7 @@
 
    
 < 현재 tracker 성능 >
-### Final results (Updated 25.04.10)
+### Final results(Updated 25.04.10)
 
 | Class     | AMOTA | AMOTP | RECALL | MOTAR | GT        | MOTA  | MOTP  | MT   | ML  | FAF  | TP     | FP     | FN     | IDS | FRAG | TID  | LGD  |
 |-----------|-------|-------|--------|--------|-----------|-------|-------|------|-----|------|--------|--------|--------|-----|------|------|------|
