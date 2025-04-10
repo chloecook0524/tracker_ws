@@ -35,6 +35,7 @@ class KalmanTrackedObject:
         self.age = 0.0
         self.missed_count = 0
         self.last_update = rospy.Time.now().to_sec()
+        self.hits = 1
 
     def predict(self, dt):
         self.x += self.vx * dt * np.cos(self.yaw)
@@ -63,9 +64,11 @@ class KalmanTrackedObject:
         self.label = detection['type']
         self.last_update = rospy.Time.now().to_sec()
         self.missed_count = 0
+        self.hits += 1 
 
     def tracking_score(self):
-        return max(0.1, min(1.0, self.age / 1.5))
+        return max(0.1, min(1.0, self.hits / (self.age + 1e-6)))
+
 
 class KalmanMultiObjectTracker:
     def __init__(self):
