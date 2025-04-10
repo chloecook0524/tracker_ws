@@ -5,6 +5,8 @@ import uuid
 from std_msgs.msg import Header, Float32
 from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
 from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
+from scipy.optimize import linear_sum_assignment
+
 
 def compute_yaw_similarity(yaw1, yaw2):
     dyaw = abs(yaw1 - yaw2)
@@ -20,6 +22,36 @@ def iou_2d(box1, box2):
     inter_area = inter_w * inter_l
     union_area = w1 * l1 + w2 * l2 - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
+
+def hungarian_iou_matching(tracks, detections):
+    if not tracks or not detections:
+        return [], list(range(len(detections))), list(range(len(tracks)))
+
+    cost_matrix = np.ones((len(tracks), len(detections)))
+    for i, track in enumerate(tracks):
+        for j, det in enumerate(detections):
+            w1, l1 = track.size[0], track.size[1]
+            w2, l2 = det['size'][0], det['size'][1]
+            if w1 <= 0 or l1 <= 0 or w2 <= 0 or l2 <= 0:
+                iou = 0.0
+            else:
+                inter_w = min(w1, w2)
+                inter_l = min(l1, l2)
+                inter_area = inter_w * inter_l
+                union_area = w1 * l1 + w2 * l2 - inter_area
+                iou = inter_area / union_area if union_area > 0 else 0.0
+            cost_matrix[i, j] = 1 - iou
+
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    matches, unmatched_tracks, unmatched_dets = [], set(range(len(tracks))), set(range(len(detections)))
+
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] < 0.9:
+            matches.append((r, c))
+            unmatched_tracks.discard(r)
+            unmatched_dets.discard(c)
+
+    return matches, list(unmatched_dets), list(unmatched_tracks)
 
 class TrackState:
     TENTATIVE = 1
@@ -89,30 +121,26 @@ class KalmanMultiObjectTracker:
 
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
-        unmatched_dets = detections[:]
 
-        for track in self.tracks:
-            best_det = None
-            best_score = 0.0
-            for det in unmatched_dets:
-                dist = np.linalg.norm([track.x - det['position'][0], track.y - det['position'][1]])
-                iou = iou_2d(track.size, det['size'])
-                yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
+        matches, unmatched_dets, unmatched_tracks = hungarian_iou_matching(self.tracks, detections)
 
-                if dist < 3.0 and iou > 0.01:
-                    score = (1.0 / (dist + 1e-6)) + iou + yaw_sim
-                    if score > best_score:
-                        best_score = score
-                        best_det = det
+        # === Matching된 트랙 업데이트
+        for track_idx, det_idx in matches:
+            self.tracks[track_idx].update(detections[det_idx], dt)
 
-            if best_det:
-                track.update(best_det, dt)
-                unmatched_dets.remove(best_det)
+        # === 새로 들어온 unmatched detection은 신규 트랙으로 추가
+        for det_idx in unmatched_dets:
+            self.tracks.append(KalmanTrackedObject(detections[det_idx]))
 
-        for det in unmatched_dets:
-            self.tracks.append(KalmanTrackedObject(det))
+        # === 매칭 안된 트랙은 missed count 증가
+        for track_idx in unmatched_tracks:
+            self.tracks[track_idx].missed_count += 1
 
-        self.tracks = [t for t in self.tracks if (now - t.last_update < 2.0 and t.missed_count <= 5)]
+        # === 오래된 트랙 제거
+        self.tracks = [
+            t for t in self.tracks
+            if (now - t.last_update < self.max_age and t.missed_count <= self.max_missed)
+        ]
 
     def get_tracks(self):
         result = []
