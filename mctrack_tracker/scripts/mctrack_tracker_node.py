@@ -8,6 +8,7 @@ from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
 from scipy.optimize import linear_sum_assignment
 
 
+# === Utility Functions ===
 def compute_yaw_similarity(yaw1, yaw2):
     dyaw = abs(yaw1 - yaw2)
     return np.cos(dyaw)
@@ -23,6 +24,7 @@ def iou_2d(box1, box2):
     union_area = w1 * l1 + w2 * l2 - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
 
+# === Hungarian IoU Matching Function ===
 def hungarian_iou_matching(tracks, detections):
     if not tracks or not detections:
         return [], list(range(len(detections))), list(range(len(tracks)))
@@ -53,11 +55,13 @@ def hungarian_iou_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
+# === TrackState Enum ===
 class TrackState:
     TENTATIVE = 1
     CONFIRMED = 2
     DELETED = 3
 
+# === Kalman Tracked Object Class ===
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
         self.id = obj_id or uuid.uuid4().int % 65536
@@ -109,11 +113,17 @@ class KalmanTrackedObject:
     def tracking_score(self):
         return max(0.1, min(1.0, self.hits / (self.age + 1e-6)))
 
+# === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
-    def __init__(self):
+    def __init__(self, use_hungarian=False, use_reactivation=False, use_confidence_filtering=False):
         self.tracks = []
         self.max_age = 2.0
         self.max_missed = 5
+
+        # Flags
+        self.use_hungarian = use_hungarian
+        self.use_reactivation = use_reactivation
+        self.use_confidence_filtering = use_confidence_filtering
 
     def predict(self, dt):
         for track in self.tracks:
@@ -122,25 +132,42 @@ class KalmanMultiObjectTracker:
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
 
-        matches, unmatched_dets, unmatched_tracks = hungarian_iou_matching(self.tracks, detections)
+        # Apply Hungarian IoU matching if flag is set
+        if self.use_hungarian:
+            matches, unmatched_dets, unmatched_tracks = hungarian_iou_matching(self.tracks, detections)
+        else:
+            matches, unmatched_dets, unmatched_tracks = [], [], list(range(len(detections)))
 
-        # === Matching된 트랙 업데이트
-        for track_idx, det_idx in matches:
-            self.tracks[track_idx].update(detections[det_idx], dt)
+        # Apply reactivation if flag is set
+        if self.use_reactivation:
+            for ti in unmatched_tracks:
+                best_di = -1
+                best_dist = 2.0
+                for di in unmatched_dets:
+                    dx = self.tracks[ti].x - detections[di]['position'][0]
+                    dy = self.tracks[ti].y - detections[di]['position'][1]
+                    dist = np.hypot(dx, dy)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_di = di
+                if best_di >= 0:
+                    matches.append((ti, best_di))
+                    unmatched_dets.remove(best_di)
 
-        # === 새로 들어온 unmatched detection은 신규 트랙으로 추가
-        for det_idx in unmatched_dets:
-            self.tracks.append(KalmanTrackedObject(detections[det_idx]))
+        # Apply confidence filtering if flag is set
+        if self.use_confidence_filtering:
+            matches = [(ti, di) for (ti, di) in matches if detections[di]["confidence"] >= 0.3]
 
-        # === 매칭 안된 트랙은 missed count 증가
-        for track_idx in unmatched_tracks:
-            self.tracks[track_idx].missed_count += 1
+        # Update tracks
+        for ti, di in matches:
+            self.tracks[ti].update(detections[di], dt)
 
-        # === 오래된 트랙 제거
-        self.tracks = [
-            t for t in self.tracks
-            if (now - t.last_update < self.max_age and t.missed_count <= self.max_missed)
-        ]
+        # Create new tracks for unmatched detections
+        for di in unmatched_dets:
+            self.tracks.append(KalmanTrackedObject(detections[di]))
+
+        # Keep only tracks that have not expired
+        self.tracks = [t for t in self.tracks if (now - t.last_update < self.max_age and t.missed_count <= self.max_missed)]
 
     def get_tracks(self):
         result = []
@@ -157,11 +184,16 @@ class KalmanMultiObjectTracker:
                 })
         return result
 
+# === MCTrack Tracker Node ===
 class MCTrackTrackerNode:
     def __init__(self):
         rospy.init_node("mctrack_tracker_node", anonymous=True)
 
-        self.tracker = KalmanMultiObjectTracker()
+        self.tracker = KalmanMultiObjectTracker(
+            use_hungarian=True,  # Enable Hungarian IoU matching
+            use_reactivation=True,  # Enable track reactivation
+            use_confidence_filtering=True  # Enable confidence filtering
+        )
         self.tracking_pub = rospy.Publisher("/tracking/objects", PfGMFATrackArray, queue_size=10)
 
         self.detection_sub = rospy.Subscriber("/lidar_detection", LidarPerceptionOutput, self.detection_callback, queue_size=1)
