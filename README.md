@@ -46,7 +46,7 @@
 
 
 < 참고 >
-mctrack_tracker_node_base.py >  칼만필터만 적용된 베이스 트래커, 성능은 이하와 같음
+mctrack_tracker_node_base.py : 칼만필터만 적용된 베이스 트래커, 성능은 이하와 같음
 ### Final results
 
 | Class     | AMOTA | AMOTP | RECALL | MOTAR |   GT     | MOTA | MOTP | MT   | ML |  FAF  |   TP   |    FP     |  FN  | IDS | FRAG |  TID |  LGD |
