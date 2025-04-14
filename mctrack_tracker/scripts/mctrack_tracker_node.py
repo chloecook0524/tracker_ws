@@ -32,16 +32,7 @@ def hungarian_iou_matching(tracks, detections):
     cost_matrix = np.ones((len(tracks), len(detections)))
     for i, track in enumerate(tracks):
         for j, det in enumerate(detections):
-            w1, l1 = track.size[0], track.size[1]
-            w2, l2 = det['size'][0], det['size'][1]
-            if w1 <= 0 or l1 <= 0 or w2 <= 0 or l2 <= 0:
-                iou = 0.0
-            else:
-                inter_w = min(w1, w2)
-                inter_l = min(l1, l2)
-                inter_area = inter_w * inter_l
-                union_area = w1 * l1 + w2 * l2 - inter_area
-                iou = inter_area / union_area if union_area > 0 else 0.0
+            iou = iou_2d(track.size[:2], det["size"][:2])
             cost_matrix[i, j] = 1 - iou
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
@@ -78,6 +69,7 @@ class KalmanTrackedObject:
         self.hits = 1
         self.state = TrackState.TENTATIVE
         self.confirm_threshold = 3
+        self.soft_deleted = False
 
     def predict(self, dt):
         self.x += self.vx * dt * np.cos(self.yaw)
@@ -120,7 +112,6 @@ class KalmanMultiObjectTracker:
         self.max_age = 2.0
         self.max_missed = 5
 
-        # Flags
         self.use_hungarian = use_hungarian
         self.use_reactivation = use_reactivation
         self.use_confidence_filtering = use_confidence_filtering
@@ -131,80 +122,38 @@ class KalmanMultiObjectTracker:
             track.predict(dt)
 
     def _get_class_distance_threshold(self, label):
-        pedestrian_like = [6, 7, 8]  # pedestrian, motorcycle, bicycle
+        pedestrian_like = [6, 7, 8]
         return 1.5 if label in pedestrian_like else 3.0
 
-    def _assistive_matching(self, matches, unmatched_dets, unmatched_tracks, detections):
-        matched_dets = set(di for _, di in matches)
-        matched_tracks = set(ti for ti, _ in matches)
-
-        for ti in unmatched_tracks[:]:
-            best_di, best_dist = -1, float('inf')
-            dist_thresh = self._get_class_distance_threshold(self.tracks[ti].label)
-
-            for di in unmatched_dets:
-                if di in matched_dets:
+    def _reid_soft_deleted_tracks(self, detections, dt):
+        used_indices = set()
+        for det_idx, det in enumerate(detections):
+            best_score, best_track = 0.0, None
+            for track in self.tracks:
+                if not track.soft_deleted:
                     continue
-                dx = self.tracks[ti].x - detections[di]["position"][0]
-                dy = self.tracks[ti].y - detections[di]["position"][1]
+                dx = track.x - det["position"][0]
+                dy = track.y - det["position"][1]
                 dist = np.hypot(dx, dy)
-                if dist < best_dist and dist < dist_thresh:
-                    best_dist = dist
-                    best_di = di
+                if dist > self._get_class_distance_threshold(track.label):
+                    continue
+                iou = iou_2d(track.size[:2], det['size'][:2])
+                yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
+                score = iou * yaw_sim
+                if score > best_score and score > 0.6:  # ✅ 더 강한 기준
+                    best_score = score
+                    best_track = track
+            if best_track and det_idx not in used_indices:
+                best_track.soft_deleted = False
+                best_track.update(det, dt)
+                best_track.hits += 1
+                used_indices.add(det_idx)  # ✅ 재활성화된 detection 재사용 방지
 
-            if best_di >= 0:
-                matches.append((ti, best_di))
-                matched_dets.add(best_di)
-                matched_tracks.add(ti)
-                unmatched_dets.remove(best_di)
-                unmatched_tracks.remove(ti)
-        return matches, unmatched_dets, unmatched_tracks
-
-    def _reactivation(self, matches, unmatched_dets, unmatched_tracks, detections):
-        for ti in unmatched_tracks[:]:
-            best_di, best_dist = -1, float('inf')
-            dist_thresh = self._get_class_distance_threshold(self.tracks[ti].label)
-
-            for di in unmatched_dets:
-                dx = self.tracks[ti].x - detections[di]["position"][0]
-                dy = self.tracks[ti].y - detections[di]["position"][1]
-                dist = np.hypot(dx, dy)
-                if dist < best_dist and dist < dist_thresh:
-                    best_dist = dist
-                    best_di = di
-
-            if best_di >= 0:
-                matches.append((ti, best_di))
-                unmatched_dets.remove(best_di)
-                unmatched_tracks.remove(ti)
-        return matches, unmatched_dets, unmatched_tracks
 
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
 
-        # === Pure Hungarian-only path
-        if self.use_hungarian and not (self.use_assistive_matching or self.use_confidence_filtering or self.use_reactivation):
-            matches, unmatched_dets, unmatched_tracks = hungarian_iou_matching(self.tracks, detections)
-
-            for ti, di in matches:
-                self.tracks[ti].update(detections[di], dt)
-            for di in unmatched_dets:
-                self.tracks.append(KalmanTrackedObject(detections[di]))
-            for ti in unmatched_tracks:
-                self.tracks[ti].missed_count += 1
-            self.tracks = [t for t in self.tracks if (now - t.last_update < self.max_age and t.missed_count <= self.max_missed)]
-            return
-
         matches, unmatched_dets, unmatched_tracks = hungarian_iou_matching(self.tracks, detections)
-
-        if self.use_assistive_matching:
-            matches, unmatched_dets, unmatched_tracks = self._assistive_matching(matches, unmatched_dets, unmatched_tracks, detections)
-
-        if self.use_reactivation:
-            matches, unmatched_dets, unmatched_tracks = self._reactivation(matches, unmatched_dets, unmatched_tracks, detections)
-
-        if self.use_confidence_filtering:
-            matches = [(ti, di) for (ti, di) in matches if detections[di].get("confidence", 1.0) >= 0.3]
 
         for ti, di in matches:
             self.tracks[ti].update(detections[di], dt)
@@ -212,7 +161,12 @@ class KalmanMultiObjectTracker:
             self.tracks.append(KalmanTrackedObject(detections[di]))
         for ti in unmatched_tracks:
             self.tracks[ti].missed_count += 1
-        self.tracks = [t for t in self.tracks if (now - t.last_update < self.max_age and t.missed_count <= self.max_missed)]
+
+        for track in self.tracks:
+            if now - track.last_update > self.max_age or track.missed_count > self.max_missed:
+                track.soft_deleted = True
+
+        self._reid_soft_deleted_tracks(detections, dt)
 
     def get_tracks(self):
         return [
@@ -225,22 +179,19 @@ class KalmanMultiObjectTracker:
                 "confidence": t.tracking_score(),
                 "type": t.label
             }
-            for t in self.tracks if t.state == TrackState.CONFIRMED
+            for t in self.tracks if t.state == TrackState.CONFIRMED and not t.soft_deleted
         ]
-
-
 
 # === MCTrack Tracker Node ===
 class MCTrackTrackerNode:
     def __init__(self):
         rospy.init_node("mctrack_tracker_node", anonymous=True)
 
-        # 플래그를 True로 설정하여 보조 매칭을 활성화
         self.tracker = KalmanMultiObjectTracker(
-            use_hungarian=True,  # Enable Hungarian IoU matching
-            use_reactivation=False,  # Enable track reactivation
-            use_confidence_filtering=False,  # Enable confidence filtering
-            use_assistive_matching=False  # Enable assistive matching
+            use_hungarian=True,
+            use_reactivation=False,
+            use_confidence_filtering=False,
+            use_assistive_matching=False
         )
         self.tracking_pub = rospy.Publisher("/tracking/objects", PfGMFATrackArray, queue_size=10)
 
