@@ -109,7 +109,7 @@ class KalmanTrackedObject:
 class KalmanMultiObjectTracker:
     def __init__(self, use_hungarian=False, use_reactivation=False, use_confidence_filtering=False, use_assistive_matching=False):
         self.tracks = []
-        self.max_age = 2.0
+        self.max_age = 1.2
         self.max_missed = 5
 
         self.use_hungarian = use_hungarian
@@ -140,15 +140,14 @@ class KalmanMultiObjectTracker:
                 iou = iou_2d(track.size[:2], det['size'][:2])
                 yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
                 score = iou * yaw_sim
-                if score > best_score and score > 0.6:  # ✅ 더 강한 기준
+                if score > best_score and score > 0.6:
                     best_score = score
                     best_track = track
             if best_track and det_idx not in used_indices:
                 best_track.soft_deleted = False
                 best_track.update(det, dt)
                 best_track.hits += 1
-                used_indices.add(det_idx)  # ✅ 재활성화된 detection 재사용 방지
-
+                used_indices.add(det_idx)
 
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
