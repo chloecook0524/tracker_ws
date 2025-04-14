@@ -53,6 +53,16 @@ class TrackState:
     DELETED = 3
 
 # === Kalman Tracked Object Class ===
+CLASS_CONFIG = {
+    1: {"confirm_threshold": 1, "max_unmatch": 1},  # car
+    2: {"confirm_threshold": 1, "max_unmatch": 1},  # truck
+    3: {"confirm_threshold": 1, "max_unmatch": 1},  # bus
+    4: {"confirm_threshold": 1, "max_unmatch": 1},  # trailer
+    6: {"confirm_threshold": 1, "max_unmatch": 1},  # pedestrian
+    7: {"confirm_threshold": 1, "max_unmatch": 1},  # motorcycle
+    8: {"confirm_threshold": 1, "max_unmatch": 1},  # bicycle
+}
+
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
         self.id = obj_id or uuid.uuid4().int % 65536
@@ -68,7 +78,9 @@ class KalmanTrackedObject:
         self.last_update = rospy.Time.now().to_sec()
         self.hits = 1
         self.state = TrackState.TENTATIVE
-        self.confirm_threshold = 3
+        class_id = self.label
+        self.confirm_threshold = CLASS_CONFIG.get(class_id, {"confirm_threshold": 3})["confirm_threshold"]
+        self.max_unmatch = CLASS_CONFIG.get(class_id, {"max_unmatch": 5})["max_unmatch"]
         self.soft_deleted = False
 
     def predict(self, dt):
@@ -162,7 +174,7 @@ class KalmanMultiObjectTracker:
             self.tracks[ti].missed_count += 1
 
         for track in self.tracks:
-            if now - track.last_update > self.max_age or track.missed_count > self.max_missed:
+            if now - track.last_update > self.max_age or track.missed_count > track.max_unmatch:
                 track.soft_deleted = True
 
         self._reid_soft_deleted_tracks(detections, dt)
