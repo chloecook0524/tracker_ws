@@ -82,6 +82,12 @@ class KalmanTrackedObject:
         self.confirm_threshold = CLASS_CONFIG.get(class_id, {"confirm_threshold": 3})["confirm_threshold"]
         self.max_unmatch = CLASS_CONFIG.get(class_id, {"max_unmatch": 5})["max_unmatch"]
         self.soft_deleted = False
+        self.last_seen_position = (self.x, self.y)  # Added for ReID
+
+    def reid(self, other_track):
+        # Use position, velocity, and other metrics to compare tracks
+        distance = np.hypot(self.x - other_track.x, self.y - other_track.y)
+        return distance < 5.0  # Adjust threshold for reid
 
     def predict(self, dt):
         self.x += self.vx * dt * np.cos(self.yaw)
@@ -119,7 +125,7 @@ class KalmanTrackedObject:
 
 # === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
-    def __init__(self, use_hungarian=False, use_reactivation=False, use_confidence_filtering=False, use_assistive_matching=False):
+    def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=False, use_assistive_matching=False):
         self.tracks = []
         self.max_age = 1.2
         self.max_missed = 5
@@ -177,7 +183,8 @@ class KalmanMultiObjectTracker:
             if now - track.last_update > self.max_age or track.missed_count > track.max_unmatch:
                 track.soft_deleted = True
 
-        self._reid_soft_deleted_tracks(detections, dt)
+        if self.use_reactivation:
+            self._reid_soft_deleted_tracks(detections, dt)
 
     def get_tracks(self):
         return [
@@ -200,7 +207,7 @@ class MCTrackTrackerNode:
 
         self.tracker = KalmanMultiObjectTracker(
             use_hungarian=True,
-            use_reactivation=False,
+            use_reactivation=True,  # 활성화된 reactivation
             use_confidence_filtering=False,
             use_assistive_matching=False
         )
