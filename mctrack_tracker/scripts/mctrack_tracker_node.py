@@ -82,12 +82,6 @@ class KalmanTrackedObject:
         self.confirm_threshold = CLASS_CONFIG.get(class_id, {"confirm_threshold": 3})["confirm_threshold"]
         self.max_unmatch = CLASS_CONFIG.get(class_id, {"max_unmatch": 5})["max_unmatch"]
         self.soft_deleted = False
-        self.last_seen_position = (self.x, self.y)  # Added for ReID
-
-    def reid(self, other_track):
-        # Use position, velocity, and other metrics to compare tracks
-        distance = np.hypot(self.x - other_track.x, self.y - other_track.y)
-        return distance < 5.0  # Adjust threshold for reid
 
     def predict(self, dt):
         self.x += self.vx * dt * np.cos(self.yaw)
@@ -125,7 +119,7 @@ class KalmanTrackedObject:
 
 # === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
-    def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=False, use_assistive_matching=False):
+    def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=True, use_assistive_matching=False):
         self.tracks = []
         self.max_age = 1.2
         self.max_missed = 5
@@ -187,18 +181,24 @@ class KalmanMultiObjectTracker:
             self._reid_soft_deleted_tracks(detections, dt)
 
     def get_tracks(self):
-        return [
-            {
+        results = []
+        for t in self.tracks:
+            if t.state != TrackState.CONFIRMED or t.soft_deleted:
+                continue
+            score = t.tracking_score()
+            if self.use_confidence_filtering and score < 0.3:
+                continue
+            results.append({
                 "id": t.id,
                 "x": t.x,
                 "y": t.y,
                 "yaw": t.yaw,
                 "size": t.size,
-                "confidence": t.tracking_score(),
+                "confidence": score,
                 "type": t.label
-            }
-            for t in self.tracks if t.state == TrackState.CONFIRMED and not t.soft_deleted
-        ]
+            })
+        return results
+
 
 # === MCTrack Tracker Node ===
 class MCTrackTrackerNode:
