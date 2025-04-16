@@ -24,15 +24,17 @@ def iou_2d(box1, box2):
     union_area = w1 * l1 + w2 * l2 - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
 
-# === Hungarian IoU Matching Function ===
+# === Hungarian IoU Matching Function with predicted boxes ===
 def hungarian_iou_matching(tracks, detections):
     if not tracks or not detections:
         return [], list(range(len(detections))), list(range(len(tracks)))
 
     cost_matrix = np.ones((len(tracks), len(detections)))
     for i, track in enumerate(tracks):
+        pred_box = track.size[:2]  # track은 이미 predict 이후
         for j, det in enumerate(detections):
-            iou = iou_2d(track.size[:2], det["size"][:2])
+            det_box = det["size"][:2]
+            iou = iou_2d(pred_box, det_box)
             cost_matrix[i, j] = 1 - iou
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
@@ -46,6 +48,8 @@ def hungarian_iou_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
+# === 이하 기존 코드 동일 ===
+
 # === TrackState Enum ===
 class TrackState:
     TENTATIVE = 1
@@ -54,13 +58,13 @@ class TrackState:
 
 # === Kalman Tracked Object Class ===
 CLASS_CONFIG = {
-    1: {"confirm_threshold": 1, "max_unmatch": 1},  # car
-    2: {"confirm_threshold": 1, "max_unmatch": 1},  # truck
-    3: {"confirm_threshold": 1, "max_unmatch": 1},  # bus
-    4: {"confirm_threshold": 1, "max_unmatch": 1},  # trailer
-    6: {"confirm_threshold": 1, "max_unmatch": 1},  # pedestrian
-    7: {"confirm_threshold": 1, "max_unmatch": 1},  # motorcycle
-    8: {"confirm_threshold": 1, "max_unmatch": 1},  # bicycle
+    1: {"confirm_threshold": 1, "max_unmatch": 1},
+    2: {"confirm_threshold": 1, "max_unmatch": 1},
+    3: {"confirm_threshold": 1, "max_unmatch": 1},
+    4: {"confirm_threshold": 1, "max_unmatch": 1},
+    6: {"confirm_threshold": 1, "max_unmatch": 1},
+    7: {"confirm_threshold": 1, "max_unmatch": 1},
+    8: {"confirm_threshold": 1, "max_unmatch": 1},
 }
 
 class KalmanTrackedObject:
@@ -119,7 +123,7 @@ class KalmanTrackedObject:
 
 # === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
-    def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=True, use_assistive_matching=False):
+    def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=True, use_assistive_matching=True):
         self.tracks = []
         self.max_age = 1.2
         self.max_missed = 5
@@ -161,6 +165,26 @@ class KalmanMultiObjectTracker:
                 best_track.hits += 1
                 used_indices.add(det_idx)
 
+    def _fallback_match(self, unmatched_tracks, unmatched_dets, detections, dt):
+        used_dets = set()
+        for ti in unmatched_tracks:
+            track = self.tracks[ti]
+            best_dist = float('inf')
+            best_det = -1
+            for di in unmatched_dets:
+                if di in used_dets:
+                    continue
+                det = detections[di]
+                dx = track.x - det['position'][0]
+                dy = track.y - det['position'][1]
+                dist = np.hypot(dx, dy)
+                if dist < self._get_class_distance_threshold(track.label) and dist < best_dist:
+                    best_dist = dist
+                    best_det = di
+            if best_det >= 0:
+                track.update(detections[best_det], dt)
+                used_dets.add(best_det)
+
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
 
@@ -180,6 +204,9 @@ class KalmanMultiObjectTracker:
         if self.use_reactivation:
             self._reid_soft_deleted_tracks(detections, dt)
 
+        if self.use_assistive_matching:
+            self._fallback_match(unmatched_tracks, unmatched_dets, detections, dt)
+
     def get_tracks(self):
         results = []
         for t in self.tracks:
@@ -198,7 +225,6 @@ class KalmanMultiObjectTracker:
                 "type": t.label
             })
         return results
-
 
 # === MCTrack Tracker Node ===
 class MCTrackTrackerNode:
