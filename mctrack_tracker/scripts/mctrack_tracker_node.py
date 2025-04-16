@@ -7,7 +7,6 @@ from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
 from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
 from scipy.optimize import linear_sum_assignment
 
-
 # === Utility Functions ===
 def compute_yaw_similarity(yaw1, yaw2):
     dyaw = abs(yaw1 - yaw2)
@@ -48,8 +47,6 @@ def hungarian_iou_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
-# === 이하 기존 코드 동일 ===
-
 # === TrackState Enum ===
 class TrackState:
     TENTATIVE = 1
@@ -87,10 +84,15 @@ class KalmanTrackedObject:
         self.max_unmatch = CLASS_CONFIG.get(class_id, {"max_unmatch": 5})["max_unmatch"]
         self.soft_deleted = False
 
-    def predict(self, dt):
-        self.x += self.vx * dt * np.cos(self.yaw)
-        self.y += self.vx * dt * np.sin(self.yaw)
-        self.yaw += self.yaw_rate * dt
+    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0):
+        # 자차 기준에서 트랙의 상대 위치로 보정 (RV 기준 보정)
+        dx_ego = -ego_vel * dt * np.cos(self.yaw)
+        dy_ego = -ego_vel * dt * np.sin(self.yaw)
+        dyaw_ego = -ego_yaw_rate * dt
+
+        self.x += self.vx * dt * np.cos(self.yaw) + dx_ego
+        self.y += self.vx * dt * np.sin(self.yaw) + dy_ego
+        self.yaw += self.yaw_rate * dt + dyaw_ego
         self.age += dt
         self.missed_count += 1
 
@@ -119,7 +121,10 @@ class KalmanTrackedObject:
             self.state = TrackState.CONFIRMED
 
     def tracking_score(self):
-        return max(0.1, min(1.0, self.hits / (self.age + 1e-6)))
+        age_decay = np.exp(-0.1 * self.age)
+        vel_consistency = np.exp(-abs(self.vx - 5) / 5.0)
+        return max(0.1, min(1.0, (self.hits / (self.age + 1e-3)) * age_decay * vel_consistency))
+
 
 # === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
@@ -133,9 +138,9 @@ class KalmanMultiObjectTracker:
         self.use_confidence_filtering = use_confidence_filtering
         self.use_assistive_matching = use_assistive_matching
 
-    def predict(self, dt):
+    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0):
         for track in self.tracks:
-            track.predict(dt)
+            track.predict(dt, ego_vel, ego_yaw_rate)
 
     def _get_class_distance_threshold(self, label):
         pedestrian_like = [6, 7, 8]
@@ -169,21 +174,27 @@ class KalmanMultiObjectTracker:
         used_dets = set()
         for ti in unmatched_tracks:
             track = self.tracks[ti]
-            best_dist = float('inf')
+            best_score = -1.0
             best_det = -1
             for di in unmatched_dets:
                 if di in used_dets:
                     continue
                 det = detections[di]
-                dx = track.x - det['position'][0]
-                dy = track.y - det['position'][1]
-                dist = np.hypot(dx, dy)
-                if dist < self._get_class_distance_threshold(track.label) and dist < best_dist:
-                    best_dist = dist
+                if det['type'] != track.label:
+                    continue
+                dist = np.hypot(track.x - det['position'][0], track.y - det['position'][1])
+                if dist > self._get_class_distance_threshold(track.label):
+                    continue
+                iou = iou_2d(track.size[:2], det['size'][:2])
+                yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
+                score = iou * yaw_sim
+                if score > best_score and score > 0.3:
+                    best_score = score
                     best_det = di
             if best_det >= 0:
                 track.update(detections[best_det], dt)
                 used_dets.add(best_det)
+
 
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
@@ -270,7 +281,7 @@ class MCTrackTrackerNode:
             }
             detections.append(det)
 
-        self.tracker.predict(dt)
+        self.tracker.predict(dt, self.ego_vel, self.ego_yaw_rate)
         self.tracker.update(detections, dt)
         tracks = self.tracker.get_tracks()
 
