@@ -10,7 +10,7 @@
 
    
 < 현재 tracker 성능 >
-### Final Results (Updated 25.04.16)
+### Final Results (Updated 25.04.16 - BEV-only IOU MATCHING)
 | Class    | AMOTA | AMOTP | RECALL | MOTAR | GT     | MOTA  | MOTP  | MT   | ML | FAF  | TP    | FP    | FN   | IDS | FRAG | TID  | LGD  |
 |----------|-------|-------|--------|-------|--------|-------|-------|------|----|------|--------|--------|------|------|------|------|------|
 | bicycle  | 0.703 | 0.112 | 0.987  | 0.721 | 1993   | 0.711 | 0.064 | 153  | 0  | 35.3 | 1965   | 548    | 25   | 3    | 5    | 0.04 | 0.07 |
