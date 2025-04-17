@@ -15,4 +15,4 @@ float32 dt2meas
 float32[] cov_mat
 float32[] spare
 float32 score
-
+float32[4] bbox_image 

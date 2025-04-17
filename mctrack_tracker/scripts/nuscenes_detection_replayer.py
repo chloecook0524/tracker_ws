@@ -33,6 +33,13 @@ def create_lidar_object(obj, tracking_id):
     lidar_obj.size = obj["size"]
     lidar_obj.yaw = quaternion_to_yaw(obj["rotation"])
     lidar_obj.score = obj.get("tracking_score", 1.0)
+    # --- add reprojection bbox if present ---
+    # expect obj["bbox_image"] = {"x1y1x2y2": [x1,y1,x2,y2]}
+    bbox_img = obj.get("bbox_image", {}).get("x1y1x2y2", None)
+    if bbox_img is not None and len(bbox_img)==4:
+        lidar_obj.bbox_image = bbox_img
+    else:    
+        lidar_obj.bbox_image = [0.0,0.0,0.0,0.0]
     return lidar_obj
 
 # === Main ===
@@ -111,6 +118,7 @@ def main():
 
         for obj in objects:
             tracking_id = obj.get("tracking_id", "0")
+            # now create_lidar_object will also fill bbox_image
             lidar_obj = create_lidar_object(obj, tracking_id)
             msg.objects.append(lidar_obj)
 
