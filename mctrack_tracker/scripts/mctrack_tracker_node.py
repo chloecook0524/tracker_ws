@@ -14,7 +14,7 @@ BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint
 # === Utility Functions ===
 def compute_yaw_similarity(yaw1, yaw2):
     dyaw = abs(yaw1 - yaw2)
-    return np.cos(dyaw)
+    return max(0.0, np.cos(dyaw)) 
 
 def iou_2d(box1, box2):
     w1, l1 = box1[0], box1[1]
@@ -42,8 +42,8 @@ def bbox_iou_2d(bbox1, bbox2):
 
 # === Matching Threshold Helpers ===
 def _get_class_distance_threshold(label):
-        pedestrian_like = [6, 7, 8]
-        return 1.5 if label in pedestrian_like else 3.0
+    pedestrian_like = [6, 7, 8]
+    return 1.5 if label in pedestrian_like else 3.0
 
 def _get_reproj_iou_thresh(label):
     if label in [6, 7, 8]:  # pedestrian, motorcycle, bicycle
@@ -68,16 +68,14 @@ def image_plane_matching(tracks, detections):
             if bbox1 is None or bbox2 is None:
                 continue
 
-            # Distance-based filtering 추가
             dx = track.x - det["position"][0]
             dy = track.y - det["position"][1]
             dist = np.hypot(dx, dy)
-            if dist > get_class_distance_threshold(track.label):
+            if dist > _get_class_distance_threshold(track.label):
                 continue
 
-            # Adaptive threshold 적용
             iou = bbox_iou_2d(bbox1, bbox2)
-            threshold = get_reproj_iou_thresh(track.label)
+            threshold = _get_reproj_iou_thresh(track.label)
             if iou > best_iou and iou > threshold:
                 best_iou = iou
                 best_di = di
@@ -204,6 +202,7 @@ class KalmanMultiObjectTracker:
         for track in self.tracks:
             track.predict(dt, ego_vel, ego_yaw_rate)
 
+    # === Modify Soft-deleted ReID with reproj_bbox filtering ===
     def _reid_soft_deleted_tracks(self, detections, dt):
         used_indices = set()
         for det_idx, det in enumerate(detections):
@@ -219,6 +218,15 @@ class KalmanMultiObjectTracker:
                 iou = iou_2d(track.size[:2], det['size'][:2])
                 yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
                 score = iou * yaw_sim
+
+                # Additional reproj_bbox condition for conservative match
+                bbox1 = getattr(track, 'reproj_bbox', None)
+                bbox2 = det.get('reproj_bbox', None)
+                if bbox1 is not None and bbox2 is not None:
+                    reproj_iou = bbox_iou_2d(bbox1, bbox2)
+                    if reproj_iou < 0.1:
+                        continue
+
                 if score > best_score and score > 0.6:
                     best_score = score
                     best_track = track
@@ -227,6 +235,7 @@ class KalmanMultiObjectTracker:
                 best_track.update(det, dt)
                 best_track.hits += 1
                 used_indices.add(det_idx)
+
 
     def _fallback_match(self, unmatched_tracks, unmatched_dets, detections, dt):
         used_dets = set()
