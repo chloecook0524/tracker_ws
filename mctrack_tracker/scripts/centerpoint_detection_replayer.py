@@ -34,14 +34,11 @@ def create_lidar_object(obj):
     lidar_obj.yaw = yaw
 
     lwh = obj.get("lwh", [1.0, 1.0, 1.0])
-    # Convert [length, width, height] → [width, length, height]
-    lidar_obj.size = [lwh[1], lwh[0], lwh[2]]
+    lidar_obj.size = [lwh[1], lwh[0], lwh[2]]  # [width, length, height]
 
     lidar_obj.score = obj.get("detection_score", 1.0)
-
     bbox_img = obj.get("bbox_image", {}).get("x1y1x2y2", [0.0, 0.0, 0.0, 0.0])
     lidar_obj.bbox_image = bbox_img if len(bbox_img) == 4 else [0.0] * 4
-
     return lidar_obj
 
 
@@ -56,33 +53,31 @@ def main():
     with open(VAL_JSON_PATH, "r") as f:
         val_data = json.load(f)
 
+    # === Publishers ===
     pub_det = rospy.Publisher("/lidar_detection", LidarPerceptionOutput, queue_size=10)
-    pub_vel = rospy.Publisher("/ego_vel_x", Float32, queue_size=1)
-    pub_yawrate = rospy.Publisher("/ego_yaw_rate", Float32, queue_size=1)
+    pub_vel = rospy.Publisher("/ego_vel_x", Float32, queue_size=10)
+    pub_yawrate = rospy.Publisher("/ego_yaw_rate", Float32, queue_size=10)
+    pub_yaw = rospy.Publisher("/ego_yaw", Float32, queue_size=10)
 
     rospy.loginfo("📡 Waiting for subscribers to connect (min 3s)...")
-    start_wait_time = rospy.Time.now().to_sec()
+    start_wait = rospy.Time.now().to_sec()
     while not rospy.is_shutdown():
-        det_conn = pub_det.get_num_connections()
-        vel_conn = pub_vel.get_num_connections()
-        yaw_conn = pub_yawrate.get_num_connections()
-        elapsed = rospy.Time.now().to_sec() - start_wait_time
-
-        if det_conn > 0 and vel_conn > 0 and yaw_conn > 0 and elapsed > 3.0:
-            rospy.loginfo(f"✅ Subscribers connected after {elapsed:.1f}s")
+        if (pub_det.get_num_connections() > 0 and pub_vel.get_num_connections() > 0
+                and pub_yawrate.get_num_connections() > 0 and pub_yaw.get_num_connections() > 0
+                and rospy.Time.now().to_sec() - start_wait > 3.0):
+            rospy.loginfo("✅ All subscribers connected.")
             break
         rospy.sleep(0.1)
-    rospy.loginfo("✅ Subscribers connected. Beginning replay...")
 
     # === Build sample_token → frame mapping ===
     det_map = {}
     for frames in val_data.values():
         for frame in frames:
             token = frame.get("cur_sample_token")
-            # keep all frames, including those with empty bboxes
-            det_map[token] = frame
+            if token:
+                det_map[token] = frame
 
-    # === Sort tokens by timestamp (default to 0 if missing) ===
+    # === Sort tokens by timestamp ===
     all_tokens = sorted(det_map.keys(), key=lambda t: det_map[t].get("timestamp", 0))
     rospy.loginfo(f"🔍 Found {len(all_tokens)} unique sample_tokens to publish.")
 
@@ -92,51 +87,50 @@ def main():
     start_time = rospy.Time.now()
 
     # === Publish loop ===
-    for i, token in enumerate(all_tokens):
+    for idx, token in enumerate(all_tokens):
         if rospy.is_shutdown():
             break
 
         frame = det_map[token]
         bboxes = frame.get("bboxes", [])
-        ego_pose = frame.get("ego_pose", {})
-        timestamp = frame.get("timestamp", None)
+        ego = frame.get("ego_pose", {})
+        ts = frame.get("timestamp")
 
+        # Publish detection
         msg = LidarPerceptionOutput()
-        msg.header = Header()
-        msg.header.stamp = rospy.Time.now()
-        msg.header.frame_id = token
-
+        msg.header = Header(stamp=rospy.Time.now(), frame_id=token)
         for box in bboxes:
             msg.objects.append(create_lidar_object(box))
+        pub_det.publish(msg)
 
-        # === Ego velocity and yaw rate 계산 ===
-        if ego_pose and timestamp is not None:
-            cur_x, cur_y = ego_pose.get("translation", [0.0, 0.0, 0.0])[:2]
-            q = ego_pose.get("rotation", [1.0, 0.0, 0.0, 0.0])
-            yaw = np.arctan2(2.0 * (q[0] * q[3] + q[1] * q[2]),
-                             1.0 - 2.0 * (q[2] ** 2 + q[3] ** 2))
+        # Publish ego motion: yaw, vel, yaw_rate
+        if ego and ts is not None:
+            cur_x, cur_y = ego.get("translation", [0.0, 0.0, 0.0])[:2]
+            q = ego.get("rotation", [1.0, 0.0, 0.0, 0.0])
+            cur_yaw = np.arctan2(2.0 * (q[0]*q[3] + q[1]*q[2]),
+                                  1.0 - 2.0 * (q[2]**2 + q[3]**2))
+            # Publish yaw
+            pub_yaw.publish(cur_yaw)
 
             if last_pose is not None and last_ts is not None:
-                dt = timestamp - last_ts
+                dt = ts - last_ts
                 if dt > 0:
                     dx = cur_x - last_pose["x"]
                     dy = cur_y - last_pose["y"]
-                    dyaw = yaw - last_pose["yaw"]
+                    dyaw = cur_yaw - last_pose["yaw"]
                     vel = np.hypot(dx, dy) / dt
                     yaw_rate = dyaw / dt
                     pub_vel.publish(vel)
                     pub_yawrate.publish(yaw_rate)
 
-            last_pose = {"x": cur_x, "y": cur_y, "yaw": yaw}
-            last_ts = timestamp
+            last_pose = {"x": cur_x, "y": cur_y, "yaw": cur_yaw}
+            last_ts = ts
 
-        pub_det.publish(msg)
-
-        # 진행률 표시
+        # Progress log
         elapsed = (rospy.Time.now() - start_time).to_sec()
-        progress = (i + 1) / len(all_tokens)
-        eta = (elapsed / progress) - elapsed if progress > 0 else 0
-        rospy.loginfo(f"[{i+1}/{len(all_tokens)}] Token: {token} | Progress: {progress*100:.1f}% | ETA: {eta:.1f}s")
+        progress = (idx + 1) / len(all_tokens)
+        eta = (elapsed / progress) - elapsed if progress > 0 else 0.0
+        rospy.loginfo(f"[{idx+1}/{len(all_tokens)}] Token: {token} | {progress*100:.1f}% | ETA: {eta:.1f}s")
 
         rate.sleep()
 

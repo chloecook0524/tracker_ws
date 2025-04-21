@@ -86,7 +86,7 @@ def image_plane_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
-# === Hungarian IoU Matching Function with predicted boxes ===
+# === Hungarian IoU Matching Function ===
 def hungarian_iou_matching(tracks, detections):
     if not tracks or not detections:
         return [], list(range(len(detections))), list(range(len(tracks)))
@@ -184,7 +184,6 @@ class KalmanTrackedObject:
         age_decay = np.exp(-0.1 * self.age)
         vel_consistency = np.exp(-abs(self.vx - 5) / 5.0)
         return max(0.1, min(1.0, (self.hits / (self.age + 1e-3)) * age_decay * vel_consistency))
-
 
 # === Kalman Multi Object Tracker Class ===
 class KalmanMultiObjectTracker:
@@ -323,7 +322,6 @@ class KalmanMultiObjectTracker:
 class MCTrackTrackerNode:
     def __init__(self):
         rospy.init_node("mctrack_tracker_node", anonymous=True)
-        # self.baseversion_data = self.load_baseversion_json(BASE_DET_JSON)
         self.tracker = KalmanMultiObjectTracker(
             use_hungarian=True,
             use_reactivation=True,
@@ -331,37 +329,18 @@ class MCTrackTrackerNode:
             use_assistive_matching=False
         )
         self.tracking_pub = rospy.Publisher("/tracking/objects", PfGMFATrackArray, queue_size=10)
-        self.detection_sub = rospy.Subscriber("/lidar_detection", LidarPerceptionOutput, self.detection_callback, queue_size=1)
-        self.vel_sub = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=1)
-        self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=1)
+        self.detection_sub = rospy.Subscriber("/lidar_detection", LidarPerceptionOutput, self.detection_callback, queue_size=10)
+        self.vel_sub = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=10)
+        self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=10)
+        # Subscribe to ego_yaw topic
+        self.yaw_sub = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=10)
+
         self.ego_vel = 0.0
         self.ego_yaw_rate = 0.0
+        self.ego_yaw = 0.0
         self.last_time = rospy.Time.now()
 
-        # Load baseversion detection data
         rospy.loginfo("MCTrackTrackerNode initialized and running.")
-
-    # def load_baseversion_json(self, path):
-    #     with open(path, 'r') as f:
-    #         base_json = json.load(f)
-
-    #     token_map = {}
-    #     seen_tokens = set()
-    #     for scene_id, scene_frames in base_json.items():
-    #         for frame in scene_frames:
-    #             token = frame.get('cur_sample_token')
-    #             if token is None:
-    #                 rospy.logwarn(f"[⚠️] Frame in scene {scene_id} missing cur_sample_token.")
-    #                 continue
-    #             if token in seen_tokens:
-    #                 rospy.logwarn(f"[⚠️] Duplicate token: {token} in scene {scene_id}")
-    #             token_map[token] = frame['bboxes']
-    #             seen_tokens.add(token)
-
-    #     print(f"[✅] Loaded {len(token_map)} tokens from baseversion data.")
-    #     return token_map
-
-
 
     def vel_callback(self, msg):
         self.ego_vel = msg.data
@@ -369,17 +348,14 @@ class MCTrackTrackerNode:
     def yawrate_callback(self, msg):
         self.ego_yaw_rate = msg.data
 
+    def yaw_callback(self, msg):
+        self.ego_yaw = msg.data
+
     def detection_callback(self, msg):
         current_time = rospy.Time.now()
         dt = (current_time - self.last_time).to_sec()
         self.last_time = current_time
-        # token = msg.header.frame_id
 
-        # if token not in self.baseversion_data:
-        #     rospy.logwarn(f"[MCTrack] Skipped unknown token: {token}")
-        #     return
-
-        # bboxes = self.baseversion_data[token]
         detections = []
         for obj in msg.objects:
             det = {
@@ -387,10 +363,11 @@ class MCTrackTrackerNode:
                 "yaw":         obj.yaw,
                 "size":        obj.size,
                 "type":        obj.label,
-                "reproj_bbox": obj.bbox_image,    # <-- add this line
+                "reproj_bbox": obj.bbox_image,
             }
             detections.append(det)
 
+        # Use ego_yaw if needed in prediction
         self.tracker.predict(dt, self.ego_vel, self.ego_yaw_rate)
         self.tracker.update(detections, dt)
         tracks = self.tracker.get_tracks()
@@ -410,14 +387,12 @@ class MCTrackTrackerNode:
 
         self.tracking_pub.publish(track_array_msg)
 
-
     def convert_category_to_id(self, category):
         mapping = {
             "car": 1, "truck": 2, "bus": 3, "trailer": 4,
             "pedestrian": 6, "motorcycle": 7, "bicycle": 8
         }
         return mapping.get(category, 0)
-
 
 if __name__ == '__main__':
     try:
