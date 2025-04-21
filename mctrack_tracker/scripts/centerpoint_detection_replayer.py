@@ -44,6 +44,7 @@ def create_lidar_object(obj):
 
     return lidar_obj
 
+
 def main():
     rospy.init_node("val_replayer_node")
     rospy.loginfo("📦 [val_replayer_node] Starting up...")
@@ -73,24 +74,29 @@ def main():
         rospy.sleep(0.1)
     rospy.loginfo("✅ Subscribers connected. Beginning replay...")
 
-    # === Flatten and sort all frames
-    all_frames = []
-    for scene_id, frames in val_data.items():
-        all_frames.extend(frames)
+    # === Build sample_token → frame mapping ===
+    det_map = {}
+    for frames in val_data.values():
+        for frame in frames:
+            token = frame.get("cur_sample_token")
+            # keep all frames, including those with empty bboxes
+            det_map[token] = frame
 
-    # 👉 정확한 sample_token 기준으로 정렬
-    all_frames = sorted(all_frames, key=lambda f: f["cur_sample_token"])
+    # === Sort tokens by timestamp (default to 0 if missing) ===
+    all_tokens = sorted(det_map.keys(), key=lambda t: det_map[t].get("timestamp", 0))
+    rospy.loginfo(f"🔍 Found {len(all_tokens)} unique sample_tokens to publish.")
 
     rate = rospy.Rate(10.0)
     last_pose = None
     last_ts = None
     start_time = rospy.Time.now()
 
-    for i, frame in enumerate(all_frames):
+    # === Publish loop ===
+    for i, token in enumerate(all_tokens):
         if rospy.is_shutdown():
             break
 
-        token = frame.get("cur_sample_token", f"frame_{i}")
+        frame = det_map[token]
         bboxes = frame.get("bboxes", [])
         ego_pose = frame.get("ego_pose", {})
         timestamp = frame.get("timestamp", None)
@@ -103,7 +109,7 @@ def main():
         for box in bboxes:
             msg.objects.append(create_lidar_object(box))
 
-        # === Ego velocity and yaw rate 계산
+        # === Ego velocity and yaw rate 계산 ===
         if ego_pose and timestamp is not None:
             cur_x, cur_y = ego_pose.get("translation", [0.0, 0.0, 0.0])[:2]
             q = ego_pose.get("rotation", [1.0, 0.0, 0.0, 0.0])
@@ -111,7 +117,7 @@ def main():
                              1.0 - 2.0 * (q[2] ** 2 + q[3] ** 2))
 
             if last_pose is not None and last_ts is not None:
-                dt = (timestamp - last_ts)
+                dt = timestamp - last_ts
                 if dt > 0:
                     dx = cur_x - last_pose["x"]
                     dy = cur_y - last_pose["y"]
@@ -128,9 +134,9 @@ def main():
 
         # 진행률 표시
         elapsed = (rospy.Time.now() - start_time).to_sec()
-        progress = (i + 1) / len(all_frames)
-        eta = (elapsed / progress) - elapsed
-        rospy.loginfo(f"[{i+1}/{len(all_frames)}] Token: {token} | Progress: {progress*100:.1f}% | ETA: {eta:.1f}s")
+        progress = (i + 1) / len(all_tokens)
+        eta = (elapsed / progress) - elapsed if progress > 0 else 0
+        rospy.loginfo(f"[{i+1}/{len(all_tokens)}] Token: {token} | Progress: {progress*100:.1f}% | ETA: {eta:.1f}s")
 
         rate.sleep()
 
