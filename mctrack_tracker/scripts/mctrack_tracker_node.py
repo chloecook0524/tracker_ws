@@ -149,16 +149,30 @@ class KalmanTrackedObject:
         self.max_unmatch = cfg["max_unmatch"]
         self.soft_deleted = False
 
+        # Initial Kalman Filter state
+        self.kf_state = np.array([self.x, self.y, self.vx, self.yaw, self.yaw_rate])  # [x, y, vx, yaw, yaw_rate]
+        self.kf_covariance = np.eye(5)  # Initial covariance matrix
+
     def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
+        # Predict the next state based on current velocity and yaw rate
+        F = np.array([[1, 0, dt, 0, 0], 
+                      [0, 1, 0, dt, 0], 
+                      [0, 0, 1, 0, 0], 
+                      [0, 0, 0, 1, dt], 
+                      [0, 0, 0, 0, 1]])  # State transition matrix
+        self.kf_state = np.dot(F, self.kf_state)
+        self.kf_covariance = np.dot(F, np.dot(self.kf_covariance, F.T))  # Update covariance matrix
+
+        # Adding ego motion correction
         dx_ego = -ego_vel * dt * np.cos(ego_yaw)
         dy_ego = -ego_vel * dt * np.sin(ego_yaw)
         dyaw_ego = -ego_yaw_rate * dt
+
         self.x += self.vx * dt * np.cos(self.yaw) + dx_ego
         self.y += self.vx * dt * np.sin(self.yaw) + dy_ego
         self.yaw += self.yaw_rate * dt + dyaw_ego
         self.age += dt
         self.missed_count += 1
-
 
     def update(self, detection, dt):
         alpha = 0.5
@@ -187,7 +201,6 @@ class KalmanTrackedObject:
         vel_consistency = np.exp(-abs(self.vx - 5) / 5.0)
         return max(0.1, min(1.0, (self.hits / (self.age + 1e-3)) * age_decay * vel_consistency))
 
-
 # === KalmanMultiObjectTracker (predict only) ===
 class KalmanMultiObjectTracker:
     def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=True, use_assistive_matching=True):
@@ -204,7 +217,6 @@ class KalmanMultiObjectTracker:
         for track in self.tracks:
             track.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
 
-    # === Modify Soft-deleted ReID with reproj_bbox filtering ===
     def _reid_soft_deleted_tracks(self, detections, dt):
         used_indices = set()
         for det_idx, det in enumerate(detections):
@@ -236,34 +248,7 @@ class KalmanMultiObjectTracker:
                 best_track.soft_deleted = False
                 best_track.update(det, dt)
                 best_track.hits += 1
-                used_indices.add(det_idx)
-
-
-    def _fallback_match(self, unmatched_tracks, unmatched_dets, detections, dt):
-        used_dets = set()
-        for ti in unmatched_tracks:
-            track = self.tracks[ti]
-            best_score = -1.0
-            best_det = -1
-            for di in unmatched_dets:
-                if di in used_dets:
-                    continue
-                det = detections[di]
-                if det['type'] != track.label:
-                    continue
-                dist = np.hypot(track.x - det['position'][0], track.y - det['position'][1])
-                if dist > _get_class_distance_threshold(track.label):
-                    continue
-                iou = iou_2d(track.size[:2], det['size'][:2])
-                yaw_sim = compute_yaw_similarity(track.yaw, det['yaw'])
-                score = iou * yaw_sim
-                if score > best_score and score > 0.3:
-                    best_score = score
-                    best_det = di
-            if best_det >= 0:
-                track.update(detections[best_det], dt)
-                used_dets.add(best_det)
-
+                used_indices.add(det_idx)        
 
     def update(self, detections, dt):
         now = rospy.Time.now().to_sec()
@@ -389,8 +374,6 @@ class MCTrackTrackerNode:
             track_array_msg.tracks.append(trk_msg)
 
         self.tracking_pub.publish(track_array_msg)
-
-
 
     def convert_category_to_id(self, category):
         mapping = {
