@@ -86,7 +86,7 @@ def image_plane_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
-# === Hungarian IoU Matching Function ===
+# === Hungarian IoU Matching Function with predicted boxes ===
 def hungarian_iou_matching(tracks, detections):
     if not tracks or not detections:
         return [], list(range(len(detections))), list(range(len(tracks)))
@@ -127,6 +127,7 @@ CLASS_CONFIG = {
     8: {"confirm_threshold": 1, "max_unmatch": 1},
 }
 
+# === KalmanTrackedObject (1/2) ===
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
         self.id = obj_id or uuid.uuid4().int % 65536
@@ -143,20 +144,21 @@ class KalmanTrackedObject:
         self.hits = 1
         self.state = TrackState.TENTATIVE
         self.reproj_bbox = detection.get('reproj_bbox', None)
-        class_id = self.label
-        self.confirm_threshold = CLASS_CONFIG.get(class_id, {"confirm_threshold": 3})["confirm_threshold"]
-        self.max_unmatch = CLASS_CONFIG.get(class_id, {"max_unmatch": 5})["max_unmatch"]
+        cfg = CLASS_CONFIG.get(self.label, {"confirm_threshold": 3, "max_unmatch": 5})
+        self.confirm_threshold = cfg["confirm_threshold"]
+        self.max_unmatch = cfg["max_unmatch"]
         self.soft_deleted = False
 
-    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0):
-        dx_ego = -ego_vel * dt * np.cos(self.yaw)
-        dy_ego = -ego_vel * dt * np.sin(self.yaw)
+    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
+        dx_ego = -ego_vel * dt * np.cos(ego_yaw)
+        dy_ego = -ego_vel * dt * np.sin(ego_yaw)
         dyaw_ego = -ego_yaw_rate * dt
         self.x += self.vx * dt * np.cos(self.yaw) + dx_ego
         self.y += self.vx * dt * np.sin(self.yaw) + dy_ego
         self.yaw += self.yaw_rate * dt + dyaw_ego
         self.age += dt
         self.missed_count += 1
+
 
     def update(self, detection, dt):
         alpha = 0.5
@@ -185,7 +187,8 @@ class KalmanTrackedObject:
         vel_consistency = np.exp(-abs(self.vx - 5) / 5.0)
         return max(0.1, min(1.0, (self.hits / (self.age + 1e-3)) * age_decay * vel_consistency))
 
-# === Kalman Multi Object Tracker Class ===
+
+# === KalmanMultiObjectTracker (predict only) ===
 class KalmanMultiObjectTracker:
     def __init__(self, use_hungarian=False, use_reactivation=True, use_confidence_filtering=True, use_assistive_matching=True):
         self.tracks = []
@@ -197,9 +200,9 @@ class KalmanMultiObjectTracker:
         self.use_confidence_filtering = use_confidence_filtering
         self.use_assistive_matching = use_assistive_matching
 
-    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0):
+    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
         for track in self.tracks:
-            track.predict(dt, ego_vel, ego_yaw_rate)
+            track.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
 
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
     def _reid_soft_deleted_tracks(self, detections, dt):
@@ -318,7 +321,7 @@ class KalmanMultiObjectTracker:
             })
         return results
 
-# === MCTrack Tracker Node with Baseversion Detection Loader ===
+# === MCTrackTrackerNode (final integration) ===
 class MCTrackTrackerNode:
     def __init__(self):
         rospy.init_node("mctrack_tracker_node", anonymous=True)
@@ -329,17 +332,14 @@ class MCTrackTrackerNode:
             use_assistive_matching=False
         )
         self.tracking_pub = rospy.Publisher("/tracking/objects", PfGMFATrackArray, queue_size=10)
-        self.detection_sub = rospy.Subscriber("/lidar_detection", LidarPerceptionOutput, self.detection_callback, queue_size=10)
-        self.vel_sub = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=10)
-        self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=10)
-        # Subscribe to ego_yaw topic
-        self.yaw_sub = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=10)
-
+        self.detection_sub = rospy.Subscriber("/lidar_detection", LidarPerceptionOutput, self.detection_callback, queue_size=1)
+        self.vel_sub = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=1)
+        self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=1)
+        self.yaw_sub = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=1)
         self.ego_vel = 0.0
         self.ego_yaw_rate = 0.0
         self.ego_yaw = 0.0
         self.last_time = rospy.Time.now()
-
         rospy.loginfo("MCTrackTrackerNode initialized and running.")
 
     def vel_callback(self, msg):
@@ -359,21 +359,24 @@ class MCTrackTrackerNode:
         detections = []
         for obj in msg.objects:
             det = {
-                "position":    [obj.pos_x, obj.pos_y],
-                "yaw":         obj.yaw,
-                "size":        obj.size,
-                "type":        obj.label,
+                "position": [obj.pos_x, obj.pos_y],
+                "yaw": obj.yaw,
+                "size": obj.size,
+                "type": obj.label,
                 "reproj_bbox": obj.bbox_image,
             }
             detections.append(det)
 
-        # Use ego_yaw if needed in prediction
-        self.tracker.predict(dt, self.ego_vel, self.ego_yaw_rate)
-        self.tracker.update(detections, dt)
-        tracks = self.tracker.get_tracks()
+        if dt <= 0:
+            rospy.logwarn(f"[MCTrack] ⚠️ Non-positive dt={dt:.4f}. Skipping tracking update, but will publish empty or old tracks.")
+        else:
+            self.tracker.predict(dt, self.ego_vel, self.ego_yaw_rate, self.ego_yaw)
+            self.tracker.update(detections, dt)
 
+        tracks = self.tracker.get_tracks()
         track_array_msg = PfGMFATrackArray()
         track_array_msg.header = msg.header
+
         for track in tracks:
             trk_msg = PfGMFATrack()
             trk_msg.pos_x = track["x"]
@@ -386,6 +389,8 @@ class MCTrackTrackerNode:
             track_array_msg.tracks.append(trk_msg)
 
         self.tracking_pub.publish(track_array_msg)
+
+
 
     def convert_category_to_id(self, category):
         mapping = {

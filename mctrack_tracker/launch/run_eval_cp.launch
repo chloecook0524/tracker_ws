@@ -2,17 +2,15 @@
   <!-- 트래커 결과 로깅 노드 -->
   <node pkg="mctrack_tracker" type="tracking_logger.py" name="logger" output="screen">
     <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json" />
+    <param name="all_tokens_path" value="/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json" />
   </node>
 
   <!-- Kalman 기반 MCTrack 스타일 트래커 노드 -->
-  <node pkg="mctrack_tracker" type="mctrack_tracker_node.py" name="tracker_node" output="screen" />
+  <node pkg="mctrack_tracker" type="mctrack_tracker_node.py" name="tracker_node" output="screen">
+    <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json" />
+  </node>
 
-  <!-- ✅ GT 기반 리플레이어는 제거하고 -->
-  <!-- <node pkg="mctrack_tracker" type="nuscenes_detection_replayer.py" name="gt_replayer" output="screen" required="true">
-    <param name="loop" value="false" />
-  </node> -->
-
-  <!-- ✅ CenterPoint 기반 detection 리플레이어로 대체 -->
+  <!-- CenterPoint 기반 detection 리플레이어 -->
   <node pkg="mctrack_tracker" type="centerpoint_detection_replayer.py" name="cp_replayer" output="screen" required="true">
     <param name="loop" value="false" />
   </node>
