@@ -1,18 +1,29 @@
 <launch>
-  <!-- 트래커 결과 로깅 노드 -->
-  <node pkg="mctrack_tracker" type="tracking_logger.py" name="logger" output="screen">
-    <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json" />
-    <param name="all_tokens_path" value="/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json" />
+  <!-- 로거 -->
+  <node pkg="mctrack_tracker"
+        type="tracking_logger.py"
+        name="logger"
+        output="screen">
+    <param name="output_path"     value="/home/chloe/nuscenes_tracking_results.json"/>
+    <param name="all_tokens_path" value="/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"/>
   </node>
 
-  <!-- Kalman 기반 MCTrack 스타일 트래커 노드 -->
-  <node pkg="mctrack_tracker" type="mctrack_tracker_node.py" name="tracker_node" output="screen">
-    <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json" />
+  <!-- 트래커: 5초 지연 후 시작 -->
+  <node pkg="mctrack_tracker"
+        type="mctrack_tracker_node.py"
+        name="tracker_node"
+        output="screen"
+        launch-prefix="bash -c 'sleep 5; exec &quot;$0&quot; &quot;$@&quot;'">
+    <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json"/>
   </node>
 
-  <!-- CenterPoint 기반 detection 리플레이어 -->
-  <node pkg="mctrack_tracker" type="centerpoint_detection_replayer.py" name="cp_replayer" output="screen" required="true">
-    <param name="loop" value="false" />
+  <!-- 리플레이어 -->
+  <node pkg="mctrack_tracker"
+        type="centerpoint_detection_replayer.py"
+        name="cp_replayer"
+        output="screen"
+        required="true">
+    <param name="loop" value="false"/>
   </node>
 </launch>
 

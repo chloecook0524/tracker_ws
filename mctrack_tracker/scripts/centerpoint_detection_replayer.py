@@ -5,7 +5,7 @@ import os
 import numpy as np
 from std_msgs.msg import Header, Float32
 from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
-from lidar_processing_msgs.msg import PfGMFATrackArray  # for wait_for_message
+from lidar_processing_msgs.msg import PfGMFATrackArray
 
 # === Constants ===
 VAL_JSON_PATH = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
@@ -13,8 +13,7 @@ GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
 
 CATEGORY_TO_LABEL = {
     "car": 1, "truck": 2, "bus": 3, "trailer": 4,
-    "construction_vehicle": 5, "pedestrian": 6,
-    "motorcycle": 7, "bicycle": 8,
+    "construction_vehicle": 5, "pedestrian": 6, "motorcycle": 7, "bicycle": 8,
     "traffic_cone": 9, "barrier": 10
 }
 
@@ -104,73 +103,75 @@ def main():
     rospy.loginfo(f"🔍 Found {len(all_tokens)} tokens to publish.")
 
     # === Publishers ===
-    pub_det = rospy.Publisher("/lidar_detection", LidarPerceptionOutput, queue_size=10)
+    pub_det = rospy.Publisher("/lidar_detection",   LidarPerceptionOutput, queue_size=len(all_tokens))
     pub_vel = rospy.Publisher("/ego_vel_x", Float32, queue_size=1)
     pub_yawrate = rospy.Publisher("/ego_yaw_rate", Float32, queue_size=1)
     pub_yaw = rospy.Publisher("/ego_yaw", Float32, queue_size=1)
 
-    # === Wait for subscribers ===
-    rospy.loginfo("📡 Waiting for subscribers...")
-    t0 = rospy.Time.now().to_sec()
-    while not rospy.is_shutdown():
-        if all(pub.get_num_connections() > 0 for pub in [pub_det, pub_vel, pub_yawrate, pub_yaw]) and rospy.Time.now().to_sec() - t0 > 3.0:
-            rospy.loginfo("✅ Subscribers connected.")
-            break
+    # 1) tracker 구독자 모두 붙을 때까지 대기
+    rospy.loginfo("⏳ Waiting for tracker to subscribe to /lidar_detection, /ego_vel_x, /ego_yaw_rate, /ego_yaw …")
+    while not rospy.is_shutdown() and (
+        pub_det.get_num_connections()    == 0 or
+        pub_vel.get_num_connections()    == 0 or
+        pub_yawrate.get_num_connections()== 0 or
+        pub_yaw.get_num_connections()    == 0
+    ):
         rospy.sleep(0.1)
-
-    # ✅ Wait until tracker starts publishing
+    rospy.loginfo("✅ All tracker subscribers detected. Starting replay.")
     wait_for_tracker_ready()
 
-    # === Replay loop ===
+    # 2) 실제 replay 루프
     rate = rospy.Rate(10.0)
     last_pose, last_ts = None, None
-    start_time = rospy.Time.now()
 
     for i, token in enumerate(all_tokens):
         if rospy.is_shutdown():
             break
 
-        entry = det_map[token]
-        bboxes = entry["bboxes"]
-        ego_pose = entry["ego_pose"]
+        entry     = det_map[token]
+        bboxes    = entry["bboxes"]
+        ego_pose  = entry["ego_pose"]
         timestamp = entry["timestamp"]
 
         msg = LidarPerceptionOutput()
         msg.header = Header()
-        msg.header.stamp = rospy.Time.now()
+        # JSON timestamp 를 ROS stamp 그대로 사용
+        if timestamp is not None:
+            msg.header.stamp = rospy.Time.from_sec(timestamp)
+        else:
+            msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = token
+
         for box in bboxes:
             msg.objects.append(create_lidar_object(box))
         pub_det.publish(msg)
 
-        # === Ego pose publish ===
+        # ego‐pose → vel/yaw_rate
         if ego_pose and timestamp is not None:
-            cur_x, cur_y = ego_pose.get("translation", [0.0, 0.0, 0.0])[:2]
-            q = ego_pose.get("rotation", [1.0, 0.0, 0.0, 0.0])
-            yaw = np.arctan2(2.0 * (q[0]*q[3] + q[1]*q[2]),
-                             1.0 - 2.0 * (q[2]**2 + q[3]**2))
+            cur_x, cur_y = ego_pose["translation"][:2]
+            q = ego_pose["rotation"]
+            yaw = np.arctan2(2*(q[0]*q[3] + q[1]*q[2]),
+                             1 - 2*(q[2]**2 + q[3]**2))
             pub_yaw.publish(yaw)
 
-            if last_pose and last_ts:
+            if last_pose is not None:
                 dt = timestamp - last_ts
                 if dt > 0:
-                    dx = cur_x - last_pose["x"]
-                    dy = cur_y - last_pose["y"]
-                    dyaw = yaw - last_pose["yaw"]
-                    pub_vel.publish(np.hypot(dx, dy) / dt)
-                    pub_yawrate.publish(dyaw / dt)
+                    dx   = cur_x - last_pose["x"]
+                    dy   = cur_y - last_pose["y"]
+                    dyaw = yaw  - last_pose["yaw"]
+                    pub_vel.publish(np.hypot(dx, dy)/dt)
+                    pub_yawrate.publish(dyaw/dt)
 
-            last_pose = {"x": cur_x, "y": cur_y, "yaw": yaw}
-            last_ts = timestamp
-
-        # === Progress log ===
-        elapsed = (rospy.Time.now() - start_time).to_sec()
-        progress = (i + 1) / len(all_tokens)
-        eta = (elapsed / progress - elapsed) if progress > 0 else 0
-        rospy.loginfo(f"[{i+1}/{len(all_tokens)}] {token} | {progress*100:.1f}% | ETA: {eta:.1f}s")
+            last_pose = {"x":cur_x, "y":cur_y, "yaw":yaw}
+            last_ts   = timestamp
 
         rate.sleep()
 
+    # 3) 마지막에 잠시 대기해서 in-flight 메시지까지 보장
+    rospy.loginfo("🎉 Replay done — waiting 2s for any in‐flight messages…")
+    rospy.sleep(2.0)
+    rospy.loginfo("🛑 Shutting down.")
     rospy.loginfo("🎉 Finished publishing all detections + ego poses.")
 
 if __name__ == "__main__":
