@@ -7,6 +7,11 @@ from std_msgs.msg import Header, Float32
 from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
 from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
 from scipy.optimize import linear_sum_assignment
+from visualization_msgs.msg import Marker, MarkerArray
+import tf2_ros
+import geometry_msgs.msg
+import tf.transformations
+
 
 # === Global Path to Baseversion Detection File ===
 BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
@@ -27,6 +32,108 @@ def iou_2d(box1, box2):
     inter_area = inter_w * inter_l
     union_area = w1 * l1 + w2 * l2 - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
+
+def bbox_iou_2d(bbox1, bbox2):
+    if not bbox1 or not bbox2:
+        return 0.0
+    x1 = max(bbox1[0], bbox2[0])
+    y1 = max(bbox1[1], bbox2[1])
+    x2 = min(bbox1[2], bbox2[2])
+    y2 = min(bbox1[3], bbox2[3])
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+    area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+    union = area1 + area2 - inter_area
+    return inter_area / union if union > 0 else 0.0
+
+def create_tracking_markers(tracks, header):
+    markers = MarkerArray()
+    for i, t in enumerate(tracks):
+        # box (cube)
+        m = Marker()
+        m.header = header
+        m.ns = "track_boxes"
+        m.id = i
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+        m.pose.position.x = t["x"]
+        m.pose.position.y = t["y"]
+        m.pose.position.z = 1.0  # 중간 높이
+
+        from tf.transformations import quaternion_from_euler
+        q = quaternion_from_euler(0, 0, t["yaw"])
+        m.pose.orientation.x = q[0]
+        m.pose.orientation.y = q[1]
+        m.pose.orientation.z = q[2]
+        m.pose.orientation.w = q[3]
+
+        m.scale.x = t["size"][0]
+        m.scale.y = t["size"][1]
+        m.scale.z = t["size"][2] if len(t["size"]) > 2 else 1.5
+
+        m.color.a = 0.5
+        m.color.r = 1.0
+        m.color.g = 1.0
+        m.color.b = 0.0
+        markers.markers.append(m)
+
+        # text
+        t_m = Marker()
+        t_m.header = header
+        t_m.ns = "track_ids"
+        t_m.id = 1000 + i
+        t_m.type = Marker.TEXT_VIEW_FACING
+        t_m.action = Marker.ADD
+        t_m.pose.position.x = t["x"]
+        t_m.pose.position.y = t["y"]
+        t_m.pose.position.z = 2.5
+        t_m.scale.z = 0.8
+        t_m.color.a = 1.0
+        t_m.color.r = 1.0
+        t_m.color.g = 1.0
+        t_m.color.b = 1.0
+        t_m.text = str(t["id"])
+        markers.markers.append(t_m)
+
+    return markers
+
+
+def create_gt_markers(gt_tracks, header):
+    markers = MarkerArray()
+    for i, obj in enumerate(gt_tracks):
+        m = Marker()
+        m.header = header
+        m.ns = "gt_boxes"
+        m.id = 2000 + i
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+        pos = obj.get('translation', [0,0,0])
+        size = obj.get('size', [1,1,1])
+        yaw  = obj.get('rotation_yaw', 0.0)
+
+        m.pose.position.x = pos[0]
+        m.pose.position.y = pos[1]
+        m.pose.position.z = 1.0  # 높이 중간
+
+        from tf.transformations import quaternion_from_euler
+        q = quaternion_from_euler(0, 0, yaw)
+        m.pose.orientation.x = q[0]
+        m.pose.orientation.y = q[1]
+        m.pose.orientation.z = q[2]
+        m.pose.orientation.w = q[3]
+
+        m.scale.x = size[0]
+        m.scale.y = size[1]
+        m.scale.z = size[2]
+
+        m.color.a = 0.4
+        m.color.r = 0.0
+        m.color.g = 0.5
+        m.color.b = 1.0
+
+        markers.markers.append(m)
+    return markers
+
 
 def bbox_iou_2d(bbox1, bbox2):
     if not bbox1 or not bbox2:
@@ -145,7 +252,12 @@ def hungarian_iou_matching(tracks, detections):
     matches, unmatched_tracks, unmatched_dets = [], set(range(len(tracks))), set(range(len(detections)))
 
     for r, c in zip(row_ind, col_ind):
-        if cost_matrix[r, c] < 0.9:  # 🔧 튜닝 가능
+        box1 = tracks[r].size[:2]
+        box2 = detections[c]["size"][:2]
+        ro_iou = ro_gdiou_2d(box1, box2, tracks[r].x[3], detections[c]["yaw"])
+
+        # 🔥 수정된 기준
+        if cost_matrix[r, c] < 2.2 and ro_iou > 0.1:
             matches.append((r, c))
             unmatched_tracks.discard(r)
             unmatched_dets.discard(c)
@@ -155,29 +267,52 @@ def hungarian_iou_matching(tracks, detections):
 
     return matches, list(unmatched_dets), list(unmatched_tracks), matched_tracks, matched_detections
 
+
 # === TrackState Enum ===
 class TrackState:
     TENTATIVE = 1
     CONFIRMED = 2
     DELETED = 3
 
-# === 클래스별 칼만 필터 설정 ===
+# === 클래스별 칼만 필터 설정 (megvii style, 5x5 version) ===
 CLASS_CONFIG = {
-    1: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.2, 0.2, 0.3, 0.01, 0.01]),
-        "R": np.diag([0.5, 0.5, 0.2]), "P": np.diag([1.0, 1.0, 1.0, 0.5, 0.5]), "expected_velocity": 10.0},  # car
-    2: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.3, 0.3, 0.4, 0.02, 0.02]),
-        "R": np.diag([0.6, 0.6, 0.3]), "P": np.diag([1.0, 1.0, 1.0, 0.6, 0.6]), "expected_velocity": 7.0},   # truck
-    3: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.2, 0.2, 0.3, 0.015, 0.015]),
-        "R": np.diag([0.5, 0.5, 0.3]), "P": np.diag([1.0, 1.0, 1.0, 0.5, 0.5]), "expected_velocity": 8.0},   # bus
-    4: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.25, 0.25, 0.35, 0.02, 0.02]),
-        "R": np.diag([0.5, 0.5, 0.3]), "P": np.diag([1.0, 1.0, 1.0, 0.5, 0.5]), "expected_velocity": 6.0},   # trailer
-    6: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.3, 0.3, 0.4, 0.025, 0.025]),
-        "R": np.diag([0.4, 0.4, 0.2]), "P": np.diag([1.0, 1.0, 1.0, 0.4, 0.4]), "expected_velocity": 1.0},   # pedestrian
-    7: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.25, 0.25, 0.35, 0.02, 0.02]),
-        "R": np.diag([0.5, 0.5, 0.3]), "P": np.diag([1.0, 1.0, 1.0, 0.5, 0.5]), "expected_velocity": 3.0},   # motorcycle
-    8: {"confirm_threshold": 2, "max_unmatch": 3, "Q": np.diag([0.2, 0.2, 0.3, 0.02, 0.02]),
-        "R": np.diag([0.5, 0.5, 0.3]), "P": np.diag([1.0, 1.0, 1.0, 0.5, 0.5]), "expected_velocity": 2.5},   # bicycle
+    1: {"confirm_threshold": 2, "max_unmatch": 3, 
+        "Q": np.diag([0.5, 0.5, 1.5, 1.5, 0.01]),
+        "R": np.diag([0.7, 0.7, 0.5]),  # ✅ 3x3
+        "P": np.diag([1.0, 1.0, 10.0, 10.0, 1.0]),
+        "expected_velocity": 10.0},
+    2: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([0.5, 0.5, 1.5, 1.5, 0.01]),
+        "R": np.diag([2.0, 2.0, 3.5]),
+        "P": np.diag([1.0, 1.0, 10.0, 10.0, 1.0]),
+        "expected_velocity": 7.0},
+    3: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([0.5, 0.5, 4.0, 4.0, 0.01]),
+        "R": np.diag([0.1, 0.1, 0.1]),
+        "P": np.diag([1.0, 1.0, 10.0, 10.0, 1.0]),
+        "expected_velocity": 8.0},
+    4: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([0.5, 0.5, 1.5, 1.5, 0.01]),
+        "R": np.diag([1.5, 1.5, 500.0]),
+        "P": np.diag([100.0, 100.0, 100.0, 100.0, 1.0]),
+        "expected_velocity": 6.0},
+    6: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([1.5, 1.5, 1.5, 1.5, 0.01]),
+        "R": np.diag([2.0, 2.0, 3.5]),
+        "P": np.diag([1.0, 1.0, 10.0, 10.0, 1.0]),
+        "expected_velocity": 1.0},
+    7: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([0.3, 0.3, 1.0, 1.0, 0.01]),
+        "R": np.diag([0.1, 0.1, 1.0]),
+        "P": np.diag([1.0, 1.0, 1.0, 1.0, 1.0]),
+        "expected_velocity": 3.0},
+    8: {"confirm_threshold": 2, "max_unmatch": 3,
+        "Q": np.diag([0.3, 0.3, 1.0, 1.0, 0.01]),
+        "R": np.diag([0.1, 0.1, 1.0]),
+        "P": np.diag([1.0, 1.0, 1.0, 1.0, 1.0]),
+        "expected_velocity": 2.5},
 }
+
 # === KalmanTrackedObject (1/2) ===
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
@@ -233,14 +368,16 @@ class KalmanTrackedObject:
         # predict
         self.x = F.dot(self.x)
         self.P = F.dot(self.P).dot(F.T) + self.Q
-        # ego‐motion compensation
-        dx   = -ego_vel * dt * np.cos(ego_yaw)
-        dy   = -ego_vel * dt * np.sin(ego_yaw)
-        dyaw = -ego_yaw_rate * dt
-        self.x[0] += dx; self.x[1] += dy; self.x[3] += dyaw
+        # # ego‐motion compensation
+        # dx   = -ego_vel * dt * np.cos(ego_yaw)
+        # dy   = -ego_vel * dt * np.sin(ego_yaw)
+        # dyaw = -ego_yaw_rate * dt
+        # self.x[0] += dx; self.x[1] += dy; self.x[3] += dyaw
         # bookkeeping
         self.age += dt
         self.missed_count += 1
+        # ego-motion 보정 후 yaw를 -π ~ π로 정규화
+        self.x[3] = np.arctan2(np.sin(self.x[3]), np.cos(self.x[3]))
 
     def update(self, detection, dt):
         prev_x = self.x[0]
@@ -454,6 +591,10 @@ class MCTrackTrackerNode:
         self.frame_idx    = 0
         self.start_time   = rospy.Time.now()
 
+        # === Static TF (map → base_link) 퍼블리시 세팅 ===
+        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
+        self.publish_static_tf()
+
         # 4) Kalman 트래커 초기화
         self.tracker = KalmanMultiObjectTracker(use_hungarian=True)
         self.tracker.use_confidence_filtering = True
@@ -462,6 +603,7 @@ class MCTrackTrackerNode:
         self.tracking_pub = rospy.Publisher("/tracking/objects",
                                             PfGMFATrackArray,
                                             queue_size=10)
+        self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)                                    
         rospy.loginfo("[Tracker] /tracking/objects 구독자 기다리는 중…")
         while self.tracking_pub.get_num_connections() == 0 and not rospy.is_shutdown():
             rospy.sleep(0.1)
@@ -494,6 +636,23 @@ class MCTrackTrackerNode:
     def yaw_callback(self, msg):
         self.ego_yaw = msg.data
 
+    def publish_static_tf(self):
+        static_tf = geometry_msgs.msg.TransformStamped()
+        static_tf.header.stamp = rospy.Time.now()
+        static_tf.header.frame_id = "map"
+        static_tf.child_frame_id = "base_link"
+        static_tf.transform.translation.x = 0.0
+        static_tf.transform.translation.y = 0.0
+        static_tf.transform.translation.z = 0.0
+        q = tf.transformations.quaternion_from_euler(0, 0, 0)
+        static_tf.transform.rotation.x = q[0]
+        static_tf.transform.rotation.y = q[1]
+        static_tf.transform.rotation.z = q[2]
+        static_tf.transform.rotation.w = q[3]
+        self.static_broadcaster.sendTransform(static_tf)
+
+        rospy.loginfo("🛰️ [Tracker] Static TF (map → base_link) published.")    
+
     def detection_callback(self, msg):
         # 1) header.stamp 을 직접 쓰도록 dt 계산
         if self.last_time_stamp is None:
@@ -506,9 +665,12 @@ class MCTrackTrackerNode:
         token = msg.header.frame_id
         rospy.loginfo(f"[Tracker] Frame {self.frame_idx}/{self.total_frames}: {token} (dt={dt:.3f}s)")
 
-        # 2) msg.objects → detections 리스트로 변환
+        # 2) msg.objects → detections 리스트로 변환 (score 0.3 이하 필터링 적용)
         detections = []
         for obj in msg.objects:
+            if obj.score < 0.3:
+                continue  # 🔥 Confidence 0.3 이하 detection은 버린다.
+
             detections.append({
                 "position":    [obj.pos_x, obj.pos_y],
                 "yaw":         obj.yaw,
@@ -569,6 +731,20 @@ class MCTrackTrackerNode:
 
         self.tracking_pub.publish(ta)
         rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
+
+        # 11) RViz 마커 퍼블리시 (tracking box + GT box)
+        header = Header()
+        header.frame_id = "map"
+        header.stamp = rospy.Time.now()
+
+        # 트래킹된 트랙 박스 퍼블리시
+        marker_array = create_tracking_markers(tracks, header)
+        self.vis_pub.publish(marker_array)
+
+        # GT 박스 퍼블리시
+        if gt_tracks:
+            gt_marker_array = create_gt_markers(gt_tracks, header)
+            self.vis_pub.publish(gt_marker_array)
             
 if __name__ == '__main__':
     try:
