@@ -226,6 +226,12 @@ def hungarian_iou_matching(tracks, detections):
     if not tracks or not detections:
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
+    # 🛠️ 클래스별 cost threshold 설정 (트레일러만 tighter)
+    cost_thresholds = {
+        4: 1.26,  # trailer
+    }
+    default_threshold = 2.2  # 나머지 클래스들은 모두 2.2 적용
+
     cost_matrix = np.ones((len(tracks), len(detections)))
 
     for i, track in enumerate(tracks):
@@ -252,12 +258,14 @@ def hungarian_iou_matching(tracks, detections):
     matches, unmatched_tracks, unmatched_dets = [], set(range(len(tracks))), set(range(len(detections)))
 
     for r, c in zip(row_ind, col_ind):
+        label = getattr(tracks[r], 'label', None)
+        threshold = cost_thresholds.get(label, default_threshold)
+
         box1 = tracks[r].size[:2]
         box2 = detections[c]["size"][:2]
         ro_iou = ro_gdiou_2d(box1, box2, tracks[r].x[3], detections[c]["yaw"])
 
-        # 🔥 수정된 기준
-        if cost_matrix[r, c] < 2.2 and ro_iou > 0.1:
+        if cost_matrix[r, c] < threshold and ro_iou > 0.1:
             matches.append((r, c))
             unmatched_tracks.discard(r)
             unmatched_dets.discard(c)
@@ -266,7 +274,6 @@ def hungarian_iou_matching(tracks, detections):
     matched_detections = [detections[c] for _, c in matches]
 
     return matches, list(unmatched_dets), list(unmatched_tracks), matched_tracks, matched_detections
-
 
 # === TrackState Enum ===
 class TrackState:
@@ -296,11 +303,14 @@ CLASS_CONFIG = {
         "R": np.diag([1.5, 1.5, 500.0]),
         "P": np.diag([100.0, 100.0, 100.0, 100.0, 1.0]),
         "expected_velocity": 6.0},
-    6: {"confirm_threshold": 2, "max_unmatch": 3,
-        "Q": np.diag([1.5, 1.5, 1.5, 1.5, 0.01]),
-        "R": np.diag([2.0, 2.0, 3.5]),
-        "P": np.diag([1.0, 1.0, 10.0, 10.0, 1.0]),
-        "expected_velocity": 1.0},
+    6: {
+        "confirm_threshold": 2,
+        "max_unmatch": 3,
+        "Q": np.diag([0.3, 0.3, 0.4, 0.025, 0.025]),
+        "R": np.diag([0.4, 0.4, 0.2]),
+        "P": np.diag([1.0, 1.0, 1.0, 0.4, 0.4]),
+        "expected_velocity": 1.0
+    },
     7: {"confirm_threshold": 2, "max_unmatch": 3,
         "Q": np.diag([0.3, 0.3, 1.0, 1.0, 0.01]),
         "R": np.diag([0.1, 0.1, 1.0]),
