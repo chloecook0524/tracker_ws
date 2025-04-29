@@ -37,6 +37,10 @@ def create_lidar_object(obj):
     lwh = obj.get("lwh", [1.0, 1.0, 1.0])
     lidar_obj.size = [lwh[1], lwh[0], lwh[2]]  # width, length, height
 
+    vel = obj.get("global_velocity", [0.0, 0.0])
+    lidar_obj.vel_x = vel[0]
+    lidar_obj.vel_y = vel[1]
+
     lidar_obj.score = obj.get("detection_score", 1.0)
     bbox_img = obj.get("bbox_image", {}).get("x1y1x2y2", [0.0]*4)
     lidar_obj.bbox_image = bbox_img if len(bbox_img) == 4 else [0.0]*4

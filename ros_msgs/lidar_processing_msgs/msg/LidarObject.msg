@@ -3,6 +3,7 @@ float32 pos_y
 float32 pos_z
 float32 yaw
 float32 vel_x
+float32 vel_y 
 float32 yaw_rate
 float32 confidence
 uint16 id
@@ -16,3 +17,4 @@ float32[] cov_mat
 float32[] spare
 float32 score
 float32[4] bbox_image 
+
