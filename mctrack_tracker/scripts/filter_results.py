@@ -17,10 +17,21 @@ def filter_results(input_path, output_path):
     meta = data["meta"]
 
     filtered_results = {}
+    token_counts = {}
     total_tokens = 0
+    duplicate_tokens = 0
     removed_objects = 0
 
     for token, objs in tqdm(results.items(), desc="Filtering"):
+        if token == "dummy":
+            # ✅ dummy 토큰은 아예 무시
+            continue
+
+        # ✅ 항상 최신 값(덮어쓰기) 유지
+        if token in token_counts:
+            duplicate_tokens += 1
+        token_counts[token] = token_counts.get(token, 0) + 1
+
         total_tokens += 1
         valid_objs = []
         for obj in objs:
@@ -28,11 +39,15 @@ def filter_results(input_path, output_path):
                 valid_objs.append(obj)
             else:
                 removed_objects += 1
-        # ✅ 프레임은 무조건 유지, 객체가 없으면 빈 리스트로
         filtered_results[token] = valid_objs
 
-    print(f"\n✅ Total sample_tokens preserved: {total_tokens}")
+    # ✅ 최종 token 개수 계산
+    final_token_count = len(filtered_results)
+
+    print(f"\n✅ Total sample_tokens processed (excluding dummy): {total_tokens}")
+    print(f"✅ Total duplicate sample_tokens (latest kept): {duplicate_tokens}")
     print(f"✅ Total objects removed due to unsupported tracking_name: {removed_objects}")
+    print(f"✅ Final sample_tokens after filtering: {final_token_count}")
 
     output = {
         "results": filtered_results,
