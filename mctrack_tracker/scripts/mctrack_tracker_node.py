@@ -11,6 +11,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 import geometry_msgs.msg
 import tf.transformations
+import traceback
+from typing import List, Dict
 
 
 # === Global Path to Baseversion Detection File ===
@@ -42,6 +44,104 @@ KF_CONFIG = {
     }
 }
 
+def transform_3dbox2corners(center, size, yaw):
+    """
+    3D 박스의 중심 (x, y), 크기 (w, l), yaw 회전값을 받아
+    BEV 상의 4개 코너 좌표를 반환합니다. (회전 적용)
+    """
+    x, y = center
+    w, l = size
+    corners = np.array([
+        [w/2, l/2],
+        [w/2, -l/2],
+        [-w/2, -l/2],
+        [-w/2, l/2]
+    ])
+
+    rotation = np.array([
+        [np.cos(yaw), -np.sin(yaw)],
+        [np.sin(yaw),  np.cos(yaw)]
+    ])
+
+    rotated = corners @ rotation.T
+    translated = rotated + np.array([x, y])
+    return translated  # shape: (4, 2)
+
+def polygon_iou(poly1, poly2):
+    """
+    두 사각형 폴리곤 (4x2 numpy array)의 IoU 계산
+    (shapely 없이 수동 구현 가능하나, 간단히 shapely 사용 권장)
+    """
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        raise ImportError("Please install shapely: pip install shapely")
+
+    poly1 = Polygon(poly1)
+    poly2 = Polygon(poly2)
+
+    if not poly1.is_valid or not poly2.is_valid:
+        return 0.0
+
+    inter = poly1.intersection(poly2).area
+    union = poly1.union(poly2).area
+    return inter / union if union > 0 else 0.0
+
+def get_class_weights(class_id):
+    # 클래스별 하이브리드 비중: (w1: ro_gdiou, w2: bev_gdiou)
+    weights = {
+        0: (0.7, 0.3),  # car
+        1: (0.9, 0.1),  # pedestrian
+        2: (0.8, 0.2),  # bicycle
+        3: (0.8, 0.2),  # motorcycle
+        4: (0.6, 0.4),  # bus
+        5: (0.5, 0.5),  # trailer
+        6: (0.6, 0.4),  # truck
+    }
+    return weights.get(class_id, (0.7, 0.3))
+
+# def get_class_weights(class_id):
+#     weights = {
+#         0: (0.5, 1.5),  # car
+#         1: (1.0, 1.0),  # pedestrian
+#         2: (1.0, 1.0),  # bicycle
+#         3: (1.0, 1.0),  # motorcycle
+#         4: (1.0, 1.0),  # bus
+#         5: (1.0, 1.0),  # trailer
+#         6: (1.0, 1.0),  # truck
+#     }
+#     return weights.get(class_id, (1.0, 1.0))
+
+def cal_rotation_gdiou_inbev(box1, box2, yaw1, yaw2, class_id, center1, center2):
+    """
+    하이브리드 코스트 함수 (Ro-GDIoU + BEV GDIoU).
+    
+    Parameters:
+    - box1, box2: [w, l]
+    - yaw1, yaw2: 각도 (radian)
+    - class_id: 객체 클래스 (0~6)
+    - center1, center2: 중심 좌표 [x, y]
+    """
+    # 1. BEV IoU 계산
+    corners1 = transform_3dbox2corners(center1, box1, yaw1)
+    corners2 = transform_3dbox2corners(center2, box2, yaw2)
+    bev_iou = polygon_iou(corners1, corners2)
+
+    # 2. yaw 차이에 대한 cosine penalty
+    yaw_diff = abs(yaw1 - yaw2)
+    yaw_penalty = 1.0 - np.cos(yaw_diff)
+
+    # 3. BEV GDIoU 보정
+    bev_gdiou = bev_iou - 0.1 * yaw_penalty
+    bev_gdiou = max(0.0, bev_gdiou)
+
+    # 4. 기존 Ro-GDIoU 계산
+    ro_iou = ro_gdiou_2d(box1, box2, yaw1, yaw2)
+
+    # 5. 클래스별 가중 평균
+    w1, w2 = get_class_weights(class_id)
+    hybrid_score = w1 * ro_iou + w2 * bev_gdiou
+    return hybrid_score
 
 # === Utility Functions ===
 def compute_yaw_similarity(yaw1, yaw2):
@@ -172,6 +272,8 @@ def sdiou_2d(bbox1, bbox2):
     area1 = (bbox1[2]-bbox1[0]) * (bbox1[3]-bbox1[1])
     area2 = (bbox2[2]-bbox2[0]) * (bbox2[3]-bbox2[1])
     union = area1 + area2 - inter
+    if area1 == 0 or area2 == 0:
+        rospy.logwarn(f"[SDIoU] Invalid area1={area1}, area2={area2}, bbox1={bbox1}, bbox2={bbox2}")
     iou = inter / union if union > 0 else 0.0
 
     cx1 = (bbox1[0] + bbox1[2]) / 2
@@ -184,8 +286,9 @@ def sdiou_2d(bbox1, bbox2):
             (bbox2[2]-bbox2[0]) * (bbox2[3]-bbox2[1])
     scale = max(scale, 1e-4)
 
-    penalty = center_dist / scale
-    return iou - penalty
+    penalty = center_dist / (scale + 1e-6)
+    return iou - 0.05 * penalty 
+
 
 def bbox_iou_2d(bbox1, bbox2):
     if not bbox1 or not bbox2:
@@ -234,10 +337,15 @@ def _get_class_distance_threshold(label):
 
 def _get_reproj_iou_thresh(label):
     if label in [6, 7, 8]:  # pedestrian, motorcycle, bicycle
-        return 0.25
+        return 0.2
     elif label in [1, 2, 3, 4]:  # car, truck, bus, trailer
-        return 0.35
-    return 0.3
+        return 0.3
+    return 0.25
+
+
+# def _get_reproj_iou_thresh(label):
+#     # From official MCTrack config: THRESHOLD.RV.COST_THRE
+#     return -0.3
 
 # === Reprojection Matching Function ===
 def image_plane_matching(tracks, detections):
@@ -245,6 +353,9 @@ def image_plane_matching(tracks, detections):
     unmatched_tracks = set(range(len(tracks)))
     unmatched_dets = set(range(len(detections)))
 
+    # cost_matrix 정의
+    cost_matrix = np.zeros((len(tracks), len(detections)))  # 비용 행렬 초기화
+
     for ti, track in enumerate(tracks):
         best_iou, best_di = -1.0, -1
         for di, det in enumerate(detections):
@@ -255,29 +366,48 @@ def image_plane_matching(tracks, detections):
             if bbox1 is None or bbox2 is None:
                 continue
 
-            dx = track.x - det["position"][0]
-            dy = track.y - det["position"][1]
+            # 트래킹 객체와 디텍션 객체 간의 거리 계산
+            dx = track.pose_state[0] - det["position"][0]  # track.x 대신 track.pose_state[0] 사용
+            dy = track.pose_state[1] - det["position"][1]  # track.y 대신 track.pose_state[1] 사용
             dist = np.hypot(dx, dy)
+
+            # 거리 기준이 특정 임계값을 초과하면 매칭을 고려하지 않음
             if dist > _get_class_distance_threshold(track.label):
                 continue
 
+            # IoU 계산 (또는 다른 계산 방식으로 비용 행렬을 업데이트)
             iou = bbox_iou_2d(bbox1, bbox2)
             threshold = _get_reproj_iou_thresh(track.label)
+
+            # 비용 행렬에 IoU 값을 저장
+            cost_matrix[ti, di] = 1 - iou  # IoU를 기반으로 비용 계산 (1 - IoU로 설정하여 IoU가 클수록 비용이 낮게 설정)
+
+            # 최상의 매칭을 찾기 위해 조건을 비교
             if iou > best_iou and iou > threshold:
                 best_iou = iou
                 best_di = di
+
         if best_di >= 0:
             matches.append((ti, best_di))
             unmatched_tracks.discard(ti)
             unmatched_dets.discard(best_di)
 
+    rospy.loginfo(f"[Image Matching] Attempted {len(tracks)} tracks vs {len(detections)} detections")
+    rospy.loginfo(f"[Image Matching] Matched {len(matches)} tracks with detections.")
     return matches, list(unmatched_dets), list(unmatched_tracks)
+
 
 def image_plane_matching_sdiou(tracks, detections):
     matches = []
     unmatched_tracks = set(range(len(tracks)))
     unmatched_dets = set(range(len(detections)))
 
+    if len(tracks) == 0 or len(detections) == 0:
+        return matches, list(unmatched_dets), list(unmatched_tracks)
+
+    # cost_matrix 정의
+    cost_matrix = np.zeros((len(tracks), len(detections)))  # 여기에 cost_matrix를 정의합니다.
+
     for ti, track in enumerate(tracks):
         best_iou, best_di = -1.0, -1
         for di, det in enumerate(detections):
@@ -286,30 +416,49 @@ def image_plane_matching_sdiou(tracks, detections):
             bbox1 = getattr(track, 'reproj_bbox', None)
             bbox2 = det.get('reproj_bbox', None)
             if bbox1 is None or bbox2 is None:
+                rospy.logwarn(f"[SDIoU] Missing bbox: track_id={track.id}, bbox1={bbox1}, bbox2={bbox2}")
                 continue
+            if bbox1 is not None and bbox2 is not None:
+                iou_val = sdiou_2d(bbox1, bbox2)
+                # rospy.loginfo(f"[RV-Match][SDIoU={iou_val:.3f}] bbox1={bbox1}, bbox2={bbox2}")
 
-            dx = track.x[0] - det["position"][0]
-            dy = track.x[1] - det["position"][1]
+            dx = track.pose_state[0] - det["position"][0]  # track.x 대신 track.pose_state[0] 사용
+            dy = track.pose_state[1] - det["position"][1]  # track.y 대신 track.pose_state[1] 사용
             dist = np.hypot(dx, dy)
             if dist > _get_class_distance_threshold(track.label):
                 continue
 
+            # IoU 계산
             sdiou = sdiou_2d(bbox1, bbox2)
+            if sdiou <= 0:
+                continue
+            # rospy.loginfo(f"[SDIoU-Match] Track ID: {track.id}, Det idx: {di}, bbox1={bbox1}, bbox2={bbox2}, SDIoU: {sdiou:.3f}")
             threshold = _get_reproj_iou_thresh(track.label)
-            if sdiou > best_iou and sdiou > threshold:
+            
+            # 비용 행렬 업데이트
+            cost_matrix[ti, di] = 1.0 - sdiou
+
+            if sdiou > best_iou and sdiou >= threshold:  # NOTE: threshold는 -0.3이므로 "크거나 같다" 체크
                 best_iou = sdiou
                 best_di = di
+
         if best_di >= 0:
             matches.append((ti, best_di))
             unmatched_tracks.discard(ti)
             unmatched_dets.discard(best_di)
 
+    # 여기에 로그 추가
+    # rospy.loginfo(f"IMAGEPLANESDIOU Cost Matrix: {cost_matrix}")  # 이제 cost_matrix가 정의되었으므로 로깅이 가능합니다.
+
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
 
+
+
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
-def hungarian_iou_matching(tracks, detections):
+def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
     if not tracks or not detections:
+        rospy.logwarn("[Hungarian Matching] No tracks or detections available!")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
     # # 🛠️ 클래스별 cost threshold 설정 (트레일러만 tighter)
@@ -335,21 +484,30 @@ def hungarian_iou_matching(tracks, detections):
         for j, det in enumerate(detections):
             box1 = track.size[:2]
             box2 = det["size"][:2]
+            center1 = track.x[:2]
+            center2 = det["position"]
+            class_id = getattr(track, 'label', 0)
 
-            # 🟨 Ro_GDIoU 계산
-            ro_iou = ro_gdiou_2d(box1, box2, track.x[3], det["yaw"])
-
-            # 거리 계산
-            dx = track.x[0] - det["position"][0]
-            dy = track.x[1] - det["position"][1]
+            dx = center1[0] - center2[0]
+            dy = center1[1] - center2[1]
             dist = np.hypot(dx, dy)
 
-            # 🟦 최종 cost
-            distance_cost_weight = 0.5
-            iou_cost = 1.0 - ro_iou
+            # ✂️ 하이브리드 방식에서만 pruning
+            if use_hybrid_cost and dist > 10.0:
+                continue
+
+            if use_hybrid_cost:
+                # ✳️ 하이브리드 방식 (정밀)
+                iou_score = cal_rotation_gdiou_inbev(box1, box2, track.x[3], det["yaw"], class_id, center1, center2)
+            else:
+                # 🔁 기존 방식 (간단)
+                iou_score = ro_gdiou_2d(box1, box2, track.x[3], det["yaw"])
+
+            iou_cost = 1.0 - iou_score
             dist_cost = dist
-            total_cost = iou_cost + distance_cost_weight * dist_cost
-            cost_matrix[i, j] = total_cost
+            cost_matrix[i, j] = iou_cost + 0.5 * dist_cost
+
+    # rospy.loginfo(f"Cost Matrix: {cost_matrix}")  
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
     matches, unmatched_tracks, unmatched_dets = [], set(range(len(tracks))), set(range(len(detections)))
@@ -366,6 +524,11 @@ def hungarian_iou_matching(tracks, detections):
             matches.append((r, c))
             unmatched_tracks.discard(r)
             unmatched_dets.discard(c)
+            
+    # if matches:
+    #     rospy.loginfo(f"[Hungarian Matching] Matched {len(matches)} tracks with detections.")
+    # else:
+    #     rospy.logwarn("[Hungarian Matching] No matches found.")
 
     matched_tracks = [tracks[r] for r, _ in matches]
     matched_detections = [detections[c] for _, c in matches]
@@ -639,9 +802,10 @@ class KalmanTrackedObject:
 
 # === KalmanMultiObjectTracker (predict only) ===
 class KalmanMultiObjectTracker:
-    def __init__(self, use_hungarian=True):
+    def __init__(self, use_hungarian=True, use_hybrid_cost=False):
         self.tracks = []
         self.use_hungarian = use_hungarian
+        self.use_hybrid_cost = use_hybrid_cost
         self.use_rv_matching = False
 
     def predict(self, dt, ego_vel, ego_yaw_rate, ego_yaw):
@@ -649,123 +813,157 @@ class KalmanMultiObjectTracker:
             t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
 
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
-    def _reid_soft_deleted_tracks(self, detections, dt):
-        used_indices = set()
-        for det_idx, det in enumerate(detections):
-            best_score, best_track = 0.0, None
+    def _reid_soft_deleted_tracks(self,
+                                  unmatched_dets: List[int],
+                                  detections: List[Dict],
+                                  dt: float) -> List[int]:
+        """
+        Try to resurrect (re-ID) any soft_deleted tracks by matching to
+        remaining detections using a high-threshold Ro-GDIoU + reproj-IoU check.
+        Returns the list of detection indices that were used to revive tracks.
+        """
+        used = []
+        for di in unmatched_dets:
+            det = detections[di]
+            best_score = 0.0
+            best_track = None
             for track in self.tracks:
-                if not track.soft_deleted:
+                if not getattr(track, 'soft_deleted', False):
                     continue
-                dx = track.x - det["position"][0]
-                dy = track.y - det["position"][1]
-                dist = np.hypot(dx, dy)
-                if dist > _get_class_distance_threshold(track.label):
+                if det['type'] != track.label:
                     continue
-                score = ro_gdiou_2d(track.size[:2], det['size'][:2], track.x[3], det['yaw'])
+                dx = track.pose_state[0] - det["position"][0]
+                dy = track.pose_state[1] - det["position"][1]
+                if np.hypot(dx, dy) > _get_class_distance_threshold(track.label):
+                    continue
 
-                # Additional reproj_bbox condition for conservative match
+                score = ro_gdiou_2d(track.size[:2],
+                                    det['size'][:2],
+                                    track.yaw_state[0],
+                                    det['yaw'])
+
                 bbox1 = getattr(track, 'reproj_bbox', None)
                 bbox2 = det.get('reproj_bbox', None)
-                if bbox1 is not None and bbox2 is not None:
-                    reproj_iou = bbox_iou_2d(bbox1, bbox2)
-                    if reproj_iou < 0.1:
-                        continue
+                if bbox1 and bbox2 and bbox_iou_2d(bbox1, bbox2) < 0.1:
+                    continue
 
                 if score > best_score and score > 0.6:
                     best_score = score
                     best_track = track
-            if best_track and det_idx not in used_indices:
+
+            if best_track is not None:
                 best_track.soft_deleted = False
                 best_track.update(det, dt)
                 best_track.hits += 1
-                used_indices.add(det_idx)
+                used.append(di)
+
+        return used
 
 
-    def _fallback_match(self, unmatched_tracks, unmatched_dets, detections, dt):
-        used_dets = set()
-        for ti in unmatched_tracks:
+    def _fallback_match(self,
+                        unmatched_trks: List[int],
+                        unmatched_dets: List[int],
+                        detections: List[Dict],
+                        dt: float) -> List[int]:
+        """
+        For each still-unmatched track, find the best remaining detection by
+        Ro-GDIoU + distance, update that track, and return which detection indices
+        were consumed.
+        """
+        used = []
+        for ti in unmatched_trks:
             track = self.tracks[ti]
             best_score = -1.0
             best_det = -1
             for di in unmatched_dets:
-                if di in used_dets:
+                if di in used:
                     continue
                 det = detections[di]
                 if det['type'] != track.label:
                     continue
-                dist = np.hypot(track.x - det['position'][0], track.y - det['position'][1])
-                if dist > _get_class_distance_threshold(track.label):
+                dx = track.pose_state[0] - det["position"][0]
+                dy = track.pose_state[1] - det["position"][1]
+                if np.hypot(dx, dy) > _get_class_distance_threshold(track.label):
                     continue
-                score = ro_gdiou_2d(track.size[:2], det['size'][:2], track.x[3], det['yaw'])
+
+                score = ro_gdiou_2d(track.size[:2],
+                                    det['size'][:2],
+                                    track.yaw_state[0],
+                                    det['yaw'])
                 if score > best_score and score > 0.3:
                     best_score = score
                     best_det = di
+
             if best_det >= 0:
-                track.update(detections[best_det], dt)
-                used_dets.add(best_det)
+                self.tracks[ti].update(detections[best_det], dt)
+                used.append(best_det)
+
+        return used
 
 
-    def update(self, detections, dt):
+    def update(self, detections, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
+        # 0) predict
+        for t in self.tracks:
+            t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
+
+        # prepare unmatched lists
         unmatched_dets = list(range(len(detections)))
         unmatched_trks = list(range(len(self.tracks)))
-        matches = []
 
-        # ✅ 통일된 Hungarian Matching (Ro_GDIoU + 거리 기반)
+        # 1) Standard Hungarian matching
         if self.use_hungarian and self.tracks and detections:
-            matches, unmatched_dets, unmatched_trks, matched_tracks, matched_detections = \
-                hungarian_iou_matching(self.tracks, detections)
-
-            for tr, det in zip(matched_tracks, matched_detections):
+            matches_h, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
+                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost)
+            for tr, det in zip(matched_trks, matched_dets):
                 tr.update(det, dt)
 
-        if self.use_rv_matching:
-            rv_matches, rv_unmatched_dets, rv_unmatched_trks = image_plane_matching_sdiou(
-                [self.tracks[i] for i in unmatched_trks],
-                [detections[i] for i in unmatched_dets]
+        # 2) SDIoU (RV) matching — only if enabled
+        if self.use_rv_matching and unmatched_trks and unmatched_dets:
+            # pass only the leftovers
+            tracks_for_s = [self.tracks[i] for i in unmatched_trks]
+            dets_for_s   = [detections[i] for i in unmatched_dets]
+            matches_s, new_unmatched_dets, new_unmatched_trks = image_plane_matching_sdiou(
+                tracks_for_s, dets_for_s
             )
-            for rel_trk_idx, rel_det_idx in rv_matches:
-                abs_trk_idx = unmatched_trks[rel_trk_idx]
-                abs_det_idx = unmatched_dets[rel_det_idx]
-                self.tracks[abs_trk_idx].update(detections[abs_det_idx], dt)
+            # remap back to absolute indices
+            rem_trks = [unmatched_trks[i] for i in new_unmatched_trks]
+            rem_dets = [unmatched_dets[i]   for i in new_unmatched_dets]
+            # update matched
+            for rel_ti, rel_di in matches_s:
+                abs_t = unmatched_trks[rel_ti]
+                abs_d = unmatched_dets[rel_di]
+                self.tracks[abs_t].update(detections[abs_d], dt)
+            unmatched_trks = rem_trks
+            unmatched_dets = rem_dets
 
-        # 2️⃣ 이미지 기반 보조 매칭
-        image_matches, new_unmatched_dets, new_unmatched_trks = image_plane_matching(
-            [self.tracks[i] for i in unmatched_trks],
-            [detections[i] for i in unmatched_dets]
-        )
-        unmatched_trks = [unmatched_trks[i] for i in new_unmatched_trks]
-        unmatched_dets = [unmatched_dets[i] for i in new_unmatched_dets]
+        # 3) Fallback matching
+        if unmatched_trks and unmatched_dets:
+            used_f = self._fallback_match(unmatched_trks, unmatched_dets, detections, dt)
+            # 여기서 used_f 에 포함된 det 인덱스는 이미 트랙이 업데이트됐으므로
+            # unmatched_dets 에서 제거해야 합니다.
+            unmatched_dets = [d for d in unmatched_dets if d not in used_f]
         
-        # 1️⃣ 보조 매칭 (fallback)
-        self._fallback_match(unmatched_trks, unmatched_dets, detections, dt)
-
-        # 3️⃣ Soft-delete ReID
-        self._reid_soft_deleted_tracks(detections, dt)
-
-        for rel_trk_idx, rel_det_idx in image_matches:
-            abs_trk_idx = unmatched_trks[rel_trk_idx]
-            abs_det_idx = unmatched_dets[rel_det_idx]
-            self.tracks[abs_trk_idx].update(detections[abs_det_idx], dt)
-
-        # 4️⃣ New track 생성
+        # 4) Re-ID of soft-deleted tracks (conservative)
+        if unmatched_dets:
+            used_r = self._reid_soft_deleted_tracks(unmatched_dets, detections, dt)
+            unmatched_dets = [d for d in unmatched_dets if d not in used_r]
+        
+        # 5) New track 생성
         for di in unmatched_dets:
             self.tracks.append(KalmanTrackedObject(detections[di]))
 
-        # 5️⃣ 죽은 트랙 제거
+        # 6) Soft-delete vs Hard-delete
         for t in self.tracks:
-            score = t.tracking_score()
-            if t.missed_count > t.max_missed or score < 0.3:
-                if not t.soft_deleted:
-                    rospy.loginfo(f"[MCTrack][SoftDelete] Track ID {t.id} soft-deleted (missed={t.missed_count}, score={score:.2f})")
+            if t.missed_count > t.max_missed:
                 t.soft_deleted = True
-
-                
-        # ✅ [추가] Soft-delete 된 트랙 중 완전 삭제 (Hard-delete)
+        # hard-delete buffer +10
         self.tracks = [
             t for t in self.tracks
-            if not (t.soft_deleted and t.missed_count > (t.max_missed + 10))  # 10 프레임 이상 missed 시 제거
-        ]        
-                
+            if not (t.soft_deleted and t.missed_count > t.max_missed + 10)
+        ]
+
+        rospy.loginfo(f"[Tracker] Total Tracks: {len(self.tracks)}")
+
     def get_tracks(self):
         results = []
         for t in self.tracks:
@@ -778,8 +976,10 @@ class KalmanMultiObjectTracker:
 
             score = t.tracking_score()
             
+            # rospy.loginfo(f"[Track Score] id={t.id}, score={score:.3f}")
+
             # ✅ 여기에 명확히 tracking_score 필터링 추가
-            if score < 0.3:
+            if score < 0.2:
                 continue
 
             x, y, yaw = t.x[0], t.x[1], t.x[3]
@@ -835,17 +1035,19 @@ class MCTrackTrackerNode:
         self.publish_static_tf()
 
         # 4) Kalman 트래커 초기화
-        self.tracker = KalmanMultiObjectTracker(use_hungarian=True)
-        self.tracker.use_confidence_filtering = True
-        
-        self.is_rv_matching = rospy.get_param("~is_rv_matching", False)
-        self.tracker.use_rv_matching = self.is_rv_matching
-        rospy.loginfo(f"[Tracker] is_rv_matching = {self.is_rv_matching}")
+        use_rv_matching = rospy.get_param("~is_rv_matching", False)
+        use_hybrid = rospy.get_param("~use_hybrid_cost", False)
 
+        self.tracker = KalmanMultiObjectTracker(
+            use_hungarian=True,
+            use_hybrid_cost=use_hybrid
+        )
+        self.tracker.use_rv_matching = use_rv_matching
+        self.tracker.use_confidence_filtering = True
         # 5) 퍼블리셔 생성 & 구독자 연결 대기
         self.tracking_pub = rospy.Publisher("/tracking/objects",
                                             PfGMFATrackArray,
-                                            queue_size=10)
+                                            queue_size=100)
         self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)                                    
         rospy.loginfo("[Tracker] /tracking/objects 구독자 기다리는 중…")
         while self.tracking_pub.get_num_connections() == 0 and not rospy.is_shutdown():
@@ -867,6 +1069,7 @@ class MCTrackTrackerNode:
         self.ego_yaw_rate    = 0.0
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
+        self.last_token = None
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
@@ -897,134 +1100,93 @@ class MCTrackTrackerNode:
         rospy.loginfo("🛰️ [Tracker] Static TF (map → base_link) published.")    
 
     def detection_callback(self, msg):
-        # 1) dt 계산
-        if self.last_time_stamp is None:
-            dt = 0.0
-        else:
-            dt = (msg.header.stamp - self.last_time_stamp).to_sec()
-        self.last_time_stamp = msg.header.stamp
-
-        self.frame_idx += 1
         token = msg.header.frame_id
-        rospy.loginfo(f"[Tracker] Frame {self.frame_idx}/{self.total_frames}: {token} (dt={dt:.3f}s)")
+        try:
+            # 디버그 시작
+            rospy.logdebug(f"[DEBUG] → detection_callback 시작 token={token}, 객체수={len(msg.objects)}")
 
-        class_min_confidence = {
-            0: 0.15,  # car
-            1: 0.16,  # pedestrian
-            2: 0.20,  # bicycle
-            3: 0.15,  # motorcycle
-            4: 0.16,  # bus
-            5: 0.17,  # trailer
-            6: 0.0,   # truck
-        }
+            # 1) dt 계산
+            if self.last_time_stamp is None:
+                dt = 0.0
+            else:
+                dt = (msg.header.stamp - self.last_time_stamp).to_sec()
+            self.last_time_stamp = msg.header.stamp
 
-    
+            # 프레임 인덱스 및 토큰 로그 (중복 증가 제거)
+            self.frame_idx += 1
+            rospy.loginfo(f"[Tracker] Frame {self.frame_idx}/{self.total_frames}: {token} (dt={dt:.3f}s)")
 
-        # # 2) detection 변환 (score 0.3 필터링)
-        detections = []
-        # for obj in msg.objects:
-        #     if obj.score < 0.3:
-        #         continue  # 🔥 Confidence 0.3 이하 detection은 버린다.
+            # 토큰 연속성 체크
+            if self.last_token == token:
+                rospy.logwarn(f"[WARN] 토큰이 반복 수신됨: {token}")
+            self.last_token = token
 
-        for obj in msg.objects:
-            label = obj.label
-            min_conf = class_min_confidence.get(label, 0.3)  # fallback 0.3
-            if obj.score < min_conf:
-                continue
+            # 2) detection 변환 (score 필터링)
+            class_min_confidence = {
+                0: 0.15, 1: 0.16, 2: 0.20, 3: 0.15,
+                4: 0.16, 5: 0.17, 6: 0.0
+            }
+            detections = []
+            for i, obj in enumerate(msg.objects):
+                if obj.score < class_min_confidence.get(obj.label, 0.3):
+                    continue
+                det = {
+                    "id":           i,
+                    "position":    [obj.pos_x, obj.pos_y],
+                    "yaw":          obj.yaw,
+                    "size":         obj.size,
+                    "type":         obj.label,
+                    "reproj_bbox": obj.bbox_image,
+                }
+                # 빈 bbox 경고
+                if det["reproj_bbox"] == [0,0,0,0]:
+                    rospy.logwarn(f"[RV-Match][INVALID] Detection ID {i} has empty bbox_image")
+                detections.append(det)
+            rospy.logdebug(f"[DEBUG] → 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
 
-            detections.append({
-                "position":    [obj.pos_x, obj.pos_y],
-                "yaw":         obj.yaw,
-                "size":        obj.size,
-                "type":        obj.label,
-                "reproj_bbox": obj.bbox_image,
-            })
+            # 3) GT 트랙 정보 (시각화용)
+            gt_tracks = self.gt_data.get(token, [])
 
-        # 3) GT 데이터에서 해당 token에 대한 GT 트랙 수 가져오기
-        gt_tracks = self.gt_data.get(token, [])
-        rospy.loginfo(f"[Tracker] GT Tracks for Token {token}: {len(gt_tracks)}")
+            # 4) predict + update: dt>0 일 때만
+            if dt > 0:
+                self.tracker.update(detections, dt,
+                                    ego_vel=self.ego_vel,
+                                    ego_yaw_rate=self.ego_yaw_rate,
+                                    ego_yaw=self.ego_yaw)
+            else:
+                rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
 
-        # 4) Tracking predict + update
-        if dt > 0:
-            self.tracker.predict(dt, self.ego_vel, self.ego_yaw_rate, self.ego_yaw)
+            # 5) 결과 퍼블리시
+            tracks = self.tracker.get_tracks()
+            rospy.loginfo(f"[Tracker] GT Tracks: {len(gt_tracks)}, Detected Tracks: {len(tracks)}")
 
-            # --- Hungarian Matching ---
-            matches, unmatched_dets, unmatched_tracks, matched_tracks, matched_detections = \
-                hungarian_iou_matching(self.tracker.tracks, detections)
+            ta = PfGMFATrackArray(header=msg.header)
+            for t in tracks:
+                m = PfGMFATrack()
+                m.pos_x          = t["x"]
+                m.pos_y          = t["y"]
+                m.yaw            = t["yaw"]
+                dims             = list(t["size"])[:3]
+                m.boundingbox    = dims + [0.0]*5
+                m.confidence_ind = t["confidence"]
+                m.id             = int(t["id"])
+                m.obj_class      = t["type"]
+                ta.tracks.append(m)
+            self.tracking_pub.publish(ta)
+            rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
 
-            for tr, det in zip(matched_tracks, matched_detections):
-                tr.update(det, dt)
+            # 6) RViz 시각화
+            vis_header = Header(frame_id="map", stamp=rospy.Time.now())
+            self.vis_pub.publish(create_tracking_markers(tracks, vis_header))
+            if gt_tracks:
+                self.vis_pub.publish(create_gt_markers(gt_tracks, vis_header))
 
-            # --- RV Matching (Scale-dependent IoU 보조 매칭) ---
-            if self.tracker.use_rv_matching:
-                rv_matches, rv_unmatched_dets, rv_unmatched_trks = image_plane_matching_sdiou(
-                    [self.tracker.tracks[i] for i in unmatched_tracks],
-                    [detections[i] for i in unmatched_dets]
-                )
-                for rel_trk_idx, rel_det_idx in rv_matches:
-                    abs_trk_idx = unmatched_tracks[rel_trk_idx]
-                    abs_det_idx = unmatched_dets[rel_det_idx]
-                    self.tracker.tracks[abs_trk_idx].update(detections[abs_det_idx], dt)
+        except Exception as e:
+            rospy.logerr(f"[detection_callback] Unexpected error: {e}\n{traceback.format_exc()}")
 
-                unmatched_tracks = [unmatched_tracks[i] for i in rv_unmatched_trks]
-                unmatched_dets = [unmatched_dets[i] for i in rv_unmatched_dets]
-
-            # --- New Track 생성 ---
-            for di in unmatched_dets:
-                self.tracker.tracks.append(KalmanTrackedObject(detections[di]))
-
-            # --- Soft Delete + Hard Delete ---
-            for t in self.tracker.tracks:
-                score = t.tracking_score()
-                if t.missed_count > t.max_missed or score < 0.3:
-                    if not t.soft_deleted:
-                        rospy.loginfo(f"[MCTrack][SoftDelete] Track ID {t.id} soft-deleted (missed={t.missed_count}, score={score:.2f})")
-                    t.soft_deleted = True
-
-            self.tracker.tracks = [
-                t for t in self.tracker.tracks
-                if not (t.soft_deleted and t.missed_count > (t.max_missed + 10))
-            ]
-        else:
-            rospy.logwarn(f"[Tracker] Skipping KF update for dt={dt:.3f}s")
-
-        # 5) Tracking 결과 퍼블리시
-        tracks = self.tracker.get_tracks()
-        rospy.loginfo(f"[Tracker] Tracks Detected: {len(tracks)}")
-        rospy.loginfo(f"[Tracker] GT Tracks: {len(gt_tracks)}, Detected Tracks: {len(tracks)}")
-
-        ta = PfGMFATrackArray()
-        ta.header = msg.header
-        for t in tracks:
-            m = PfGMFATrack()
-            m.pos_x         = t["x"]
-            m.pos_y         = t["y"]
-            m.yaw           = t["yaw"]
-            dims            = list(t["size"])[:3]
-            m.boundingbox   = dims + [0.0]*5
-            m.confidence_ind= t["confidence"]
-            m.id            = int(t["id"])
-            m.obj_class     = t["type"]
-            ta.tracks.append(m)
-
-        self.tracking_pub.publish(ta)
-        rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
-
-        # 6) RViz Visualization
-        header = Header()
-        header.frame_id = "map"
-        header.stamp = rospy.Time.now()
-
-        marker_array = create_tracking_markers(tracks, header)
-        self.vis_pub.publish(marker_array)
-
-        if gt_tracks:
-            gt_marker_array = create_gt_markers(gt_tracks, header)
-            self.vis_pub.publish(gt_marker_array)
-            
 if __name__ == '__main__':
     try:
         MCTrackTrackerNode()
         rospy.spin()
     except rospy.ROSInterruptException:
-        pass
+        pass 

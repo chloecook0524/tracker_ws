@@ -16,6 +16,7 @@
         launch-prefix="bash -c 'sleep 5; exec &quot;$0&quot; &quot;$@&quot;'">
     <param name="output_path" value="/home/chloe/nuscenes_tracking_results.json"/>
     <param name="is_rv_matching" value="true"/>
+    <param name="use_hybrid_cost" value="true" />
   </node>
 
   <!-- 리플레이어 -->
