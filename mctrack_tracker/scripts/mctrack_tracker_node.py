@@ -13,6 +13,8 @@ import geometry_msgs.msg
 import tf.transformations
 import traceback
 from typing import List, Dict
+from shapely.geometry import Polygon
+from tf.transformations import euler_from_quaternion
 
 
 # === Global Path to Baseversion Detection File ===
@@ -43,6 +45,87 @@ KF_CONFIG = {
         "P": np.eye(2)
     }
 }
+
+def box_to_polygon(x, y, size, yaw):
+    corners = transform_3dbox2corners([x, y], size[:2], yaw)
+    return Polygon(corners)
+
+
+def debug_track_vs_gt(tracks, gt_tracks, class_name):
+    # rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] GT 매칭 시작...")
+
+    class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
+    if not class_id:
+        rospy.logwarn(f"[DEBUG] class_name={class_name} not found in CLASS_NAME_MAP")
+        return
+    class_id = class_id[0]
+
+    pred_tracks = [t for t in tracks if t["type"] == class_id]
+    gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
+
+    for pt in pred_tracks:
+        px, py = pt["x"], pt["y"]
+        psize = pt["size"]
+        pyaw = pt["yaw"]
+        ppoly = box_to_polygon(px, py, psize, pyaw)
+
+        matched = False
+
+        for gt in gt_objs:
+            gx, gy = gt["translation"][:2]
+            gsize = gt["size"]
+            gyaw = quaternion_to_yaw(gt)
+            gpoly = box_to_polygon(gx, gy, gsize, gyaw)
+
+            dist = np.hypot(px - gx, py - gy)
+            iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area if (ppoly.is_valid and gpoly.is_valid) else 0.0
+            yaw_error = np.abs(np.arctan2(np.sin(pyaw - gyaw), np.cos(pyaw - gyaw)))
+
+            rospy.loginfo(f"[{class_name.upper()}] Track ID={pt['id']} ↔ GT dist={dist:.2f}m, yaw_diff={yaw_error:.2f}rad, IoU={iou:.3f}")
+            rospy.loginfo(f"   ↪ Track size={psize}, yaw={pyaw:.2f}, GT size={gsize}, yaw={gyaw:.2f}")
+            if not ppoly.is_valid or not gpoly.is_valid:
+                rospy.logwarn(f"[POLY-INVALID] Track ID={pt['id']} has invalid polygon.")
+            if dist < 10.0 and iou < 0.05:
+                rospy.logwarn(f"[NO-MATCH] distance OK ({dist:.2f}m) but IoU too low → yaw misalign or size mismatch?")
+            if iou >= 0.5:
+                matched = True
+                break
+
+        # if not matched:
+        #     rospy.logwarn(f"[MISS] No matching GT for Track ID={pt['id']} (class={class_name})")
+
+    rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] 완료. 트랙 수={len(pred_tracks)}, GT 수={len(gt_objs)}")
+
+def compute_track_recall(tracks, gt_tracks, class_name, iou_thresh=0.5):
+    class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
+    if not class_id:
+        return
+    class_id = class_id[0]
+
+    pred_tracks = [t for t in tracks if t["type"] == class_id]
+    gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
+
+    matched_gt = set()
+    for pt in pred_tracks:
+        px, py = pt["x"], pt["y"]
+        psize = pt["size"]
+        pyaw = pt["yaw"]
+        ppoly = box_to_polygon(px, py, psize, pyaw)
+
+        for i, gt in enumerate(gt_objs):
+            gx, gy = gt["translation"][:2]
+            gsize = gt["size"]
+            gyaw = quaternion_to_yaw(gt)
+            gpoly = box_to_polygon(gx, gy, gsize, gyaw)
+            if not gpoly.is_valid or not ppoly.is_valid:
+                continue
+            iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area
+            if iou >= iou_thresh:
+                matched_gt.add(i)
+                break  # 한 GT와 매칭되면 종료
+
+    recall = len(matched_gt) / len(gt_objs) if gt_objs else 0.0
+    rospy.loginfo(f"[RECALL] {class_name} matched: {len(matched_gt)}/{len(gt_objs)} (Recall={recall:.3f})")
 
 def transform_3dbox2corners(center, size, yaw):
     """
@@ -87,18 +170,18 @@ def polygon_iou(poly1, poly2):
     union = poly1.union(poly2).area
     return inter / union if union > 0 else 0.0
 
-def get_class_weights(class_id):
-    # 클래스별 하이브리드 비중: (w1: ro_gdiou, w2: bev_gdiou)
-    weights = {
-        0: (0.7, 0.3),  # car
-        1: (0.9, 0.1),  # pedestrian
-        2: (0.8, 0.2),  # bicycle
-        3: (0.8, 0.2),  # motorcycle
-        4: (0.6, 0.4),  # bus
-        5: (0.5, 0.5),  # trailer
-        6: (0.6, 0.4),  # truck
-    }
-    return weights.get(class_id, (0.7, 0.3))
+# def get_class_weights(class_id):
+#     # 클래스별 하이브리드 비중: (w1: ro_gdiou, w2: bev_gdiou)
+#     weights = {
+#         0: (0.7, 0.3),  # car
+#         1: (0.9, 0.1),  # pedestrian
+#         2: (0.8, 0.2),  # bicycle
+#         3: (0.8, 0.2),  # motorcycle
+#         4: (0.6, 0.4),  # bus
+#         5: (0.5, 0.5),  # trailer
+#         6: (0.6, 0.4),  # truck
+#     }
+#     return weights.get(class_id, (0.7, 0.3))
 
 # def get_class_weights(class_id):
 #     weights = {
@@ -111,6 +194,18 @@ def get_class_weights(class_id):
 #         6: (1.0, 1.0),  # truck
 #     }
 #     return weights.get(class_id, (1.0, 1.0))
+
+def get_class_weights(class_id):
+    weights = {
+        0: (0.7, 0.3),  # car
+        1: (0.9, 0.1),  # pedestrian (✓ keep)
+        2: (1.0, 1.0),  # bicycle     ← 강화
+        3: (1.0, 1.0),  # motorcycle  ← 강화
+        4: (0.6, 0.4),  # bus         (✓ keep)
+        5: (0.5, 0.5),  # trailer
+        6: (0.6, 0.4),  # truck
+    }
+    return weights.get(class_id, (0.7, 0.3))
 
 def cal_rotation_gdiou_inbev(box1, box2, yaw1, yaw2, class_id, center1, center2):
     """
@@ -223,6 +318,33 @@ def create_tracking_markers(tracks, header):
 
     return markers
 
+def quaternion_to_yaw(obj):
+    """
+    GT object에서 rotation(quaternion) → yaw(rad) 로 변환
+    (NuScenes [w, x, y, z] 순서를 [x, y, z, w]로 변환 후 yaw 추출)
+    bicycle / motorcycle 클래스만 출력
+    """
+    rotation = obj.get("rotation", None)
+    name = obj.get("tracking_name", "")
+    
+    if rotation and isinstance(rotation, list) and len(rotation) == 4:
+        try:
+            w, x, y, z = rotation
+            q = [x, y, z, w]
+            _, _, yaw = euler_from_quaternion(q)
+
+            # if name in ("bicycle", "motorcycle"):
+            #     rospy.loginfo(f"[quat→yaw] {name} → NuScenes q=[w={w:.3f}, x={x:.3f}, y={y:.3f}, z={z:.3f}] → yaw={yaw:.3f}")
+            
+            return yaw
+        except Exception as e:
+            rospy.logwarn(f"[quat→yaw] {name} 변환 실패: {e}")
+            return 0.0
+    else:
+        if name in ("bicycle", "motorcycle"):
+            rospy.logwarn(f"[quat→yaw] {name} rotation 필드 없음 또는 포맷 오류")
+        return 0.0
+
 
 def create_gt_markers(gt_tracks, header):
     markers = MarkerArray()
@@ -235,7 +357,7 @@ def create_gt_markers(gt_tracks, header):
         m.action = Marker.ADD
         pos = obj.get('translation', [0,0,0])
         size = obj.get('size', [1,1,1])
-        yaw = obj.get('rotation_yaw', 0.0) - np.pi/2
+        yaw = quaternion_to_yaw(obj) 
 
         m.pose.position.x = pos[0]
         m.pose.position.y = pos[1]
@@ -546,6 +668,10 @@ class TrackState:
     OBSCURED = 2
     DEAD = 4
 
+CLASS_NAME_MAP = {
+    0: "car", 1: "pedestrian", 2: "bicycle", 3: "motorcycle", 4: "bus",
+    5: "trailer", 6: "truck", 7: "ignore1", 8: "ignore2", 9: "barrier", 10: "cone"
+}
 # === 클래스별 칼만 필터 설정 (MCTRACK 완성 버전) ===
 CLASS_CONFIG = {
     0: {  # car
@@ -1023,6 +1149,11 @@ class KalmanMultiObjectTracker:
         
         # 5) New track 생성
         for di in unmatched_dets:
+            det = detections[di]
+
+            # 👉 여기에 추가
+            # if det["type"] in [2, 3]:  # bicycle, motorcy
+            #     rospy.loginfo(f"[CREATE] New track for class {det['type']}, det_id={di}")
             self.tracks.append(KalmanTrackedObject(detections[di]))
 
         # 6) Soft-delete vs Hard-delete
@@ -1060,12 +1191,34 @@ class KalmanMultiObjectTracker:
                 continue
             # 📉 신뢰도 낮은 트랙 제외
             score = t.tracking_score()
-            if score < 0.2:
+            # 👉 여기에 추가
+            # if t.label in [2, 3]:
+            #     score = t.tracking_score()
+            #     rospy.loginfo(f"[TRACK-SCORE] ID={t.id}, class={CLASS_NAME_MAP.get(t.label, '?')}, "
+            #           f"score={score:.3f}, traj_len={t.traj_length}, age={t.age:.2f}")
+
+            min_score_thresholds = {
+                2: 0.10,  # bicycle
+                3: 0.10,  # motorcycle
+            }
+            default_threshold = 0.20
+
+            score_thresh = min_score_thresholds.get(t.label, default_threshold)
+            # if t.label in [2, 3]:
+            #     rospy.loginfo(f"[TRACK-CHECK] id={t.id}, class={t.label}, score={score:.3f}, threshold={score_thresh}")
+            if score < score_thresh:
                 continue
+
+            # if t.label in [2, 3] and t.age < 1.0:
+            #     rospy.loginfo(f"[SKIP] Early age for class={t.label}, id={t.id}, age={t.age:.2f}")
+            #     continue
 
             # ✅ 최종 트랙 저장
             x, y, yaw = t.x[0], t.x[1], t.x[3]
             size = t.size
+            
+            # if t.label in [2, 3]:
+            #     rospy.loginfo(f"[DEBUG] Track label={t.label}, age={t.age:.2f}, traj_len={t.traj_length}, score={t.tracking_score():.3f}")
 
             results.append({
                 "id":         t.id,
@@ -1206,11 +1359,17 @@ class MCTrackTrackerNode:
             class_min_confidence = {
                 0: 0.15, 1: 0.16, 2: 0.20, 3: 0.15,
                 4: 0.16, 5: 0.17, 6: 0.0
-            }
+            } 
             detections = []
             for i, obj in enumerate(msg.objects):
+
                 if obj.label not in VALID_CLASSES:
                     continue
+                # rospy.loginfo(f"Class {obj.label}, score={obj.score}, bbox={obj.bbox_image}")  # ← 이 위치가 최적    
+                # 👉 여기에 추가
+                # if obj.label in [2, 3]:
+                #     rospy.loginfo(f"[DETECT] Class {CLASS_NAME_MAP.get(obj.label, '?')}, score={obj.score:.3f}")
+
                 if obj.score < class_min_confidence.get(obj.label, 0.3):
                     continue
                 det = {
@@ -1257,6 +1416,10 @@ class MCTrackTrackerNode:
             self.tracking_pub.publish(ta)
             rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
 
+            debug_track_vs_gt(tracks, gt_tracks, "bicycle")
+            debug_track_vs_gt(tracks, gt_tracks, "motorcycle")
+            compute_track_recall(tracks, gt_tracks, "bicycle")
+            compute_track_recall(tracks, gt_tracks, "motorcycle")
             # 6) RViz 시각화
             vis_header = Header(frame_id="map", stamp=rospy.Time.now())
             self.vis_pub.publish(create_tracking_markers(tracks, vis_header))
@@ -1271,4 +1434,4 @@ if __name__ == '__main__':
         MCTrackTrackerNode()
         rospy.spin()
     except rospy.ROSInterruptException:
-        pass 
+        pass
