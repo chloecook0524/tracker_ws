@@ -21,30 +21,56 @@ from tf.transformations import euler_from_quaternion
 BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
 GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
 
-# === Kalman Filter Configs for Pose, Size, and Yaw ===
-KF_CONFIG = {
-    "pose": {
-        "F": lambda dt: np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]]),
-        "H": np.array([[1, 0, 0, 0], [0, 1, 0, 0]]),
-        "Q": np.diag([0.5, 0.5, 1.0, 1.0]),
-        "R": np.diag([0.5, 0.5]),
-        "P": np.diag([1.0, 1.0, 10.0, 10.0])
-    },
-    "size": {
-        "F": np.eye(3),
-        "H": np.eye(3),
-        "Q": np.diag([0.1, 0.1, 0.1]),
-        "R": np.diag([0.1, 0.1, 0.1]),
-        "P": np.eye(3)
-    },
-    "yaw": {
-        "F": lambda dt: np.array([[1, dt], [0, 1]]),
-        "H": np.eye(2),
-        "Q": np.diag([0.1, 0.1]),
-        "R": np.diag([0.2, 5.0]),
-        "P": np.eye(2)
-    }
-}
+# === BBox 클래스 (bbox.py 내용 통합) ===
+class BBox:
+    def __init__(self, frame_id, bbox, **kwargs):
+        self.frame_id = frame_id
+        self.is_fake = False
+        self.is_interpolation = False
+        self.category = bbox["category"]
+        self.det_score = bbox["detection_score"]
+        self.lwh = bbox["lwh"]
+        self.global_xyz = bbox["global_xyz"]
+        self.global_orientation = bbox["global_orientation"]
+        self.global_yaw = bbox["global_yaw"]
+        self.global_velocity = bbox["global_velocity"]
+        self.global_acceleration = bbox["global_acceleration"]
+        self.global_velocity_fusion = self.global_velocity
+        self.global_acceleration_fusion = self.global_acceleration
+        self.global_yaw_fusion = self.global_yaw
+        self.lwh_fusion = self.lwh
+        self.global_velocity_diff = [0, 0]
+        self.global_velocity_curve = [0, 0]
+        self.global_xyz_lwh_yaw = self.global_xyz + list(self.lwh) + [self.global_yaw]
+        self.global_xyz_last = self.backward_prediction()
+        self.global_xyz_lwh_yaw_last = self.global_xyz_last + list(self.lwh) + [self.global_yaw]
+        self.global_xyz_lwh_yaw_predict = self.global_xyz_lwh_yaw
+        self.global_xyz_lwh_yaw_fusion = self.global_xyz_lwh_yaw
+        self.camera_type = bbox["bbox_image"].get("camera_type", None)
+        self.x1y1x2y2 = bbox["bbox_image"].get("x1y1x2y2", [0.0, 0.0, 0.0, 0.0])
+        self.x1y1x2y2_fusion = self.x1y1x2y2
+        self.x1y1x2y2_predict = self.x1y1x2y2
+        self.unmatch_length = 0
+
+    def backward_prediction(self):
+        last_xy = np.array(self.global_xyz[:2]) - np.array(self.global_velocity) * 0.5
+        return last_xy.tolist() + [self.global_xyz[2]]
+    
+    def transform_bbox_tlbr2xywh(self, x1y1x2y2=None):
+        if x1y1x2y2 is None:
+            x1y1x2y2 = self.x1y1x2y2
+        center_x = (x1y1x2y2[0] + x1y1x2y2[2]) / 2
+        center_y = (x1y1x2y2[1] + x1y1x2y2[3]) / 2
+        width = x1y1x2y2[2] - x1y1x2y2[0]
+        height = x1y1x2y2[3] - x1y1x2y2[1]
+        return np.array([center_x, center_y, width, height])
+
+    def transform_bbox_xywh2tlbr(self, xywh):
+        x1 = xywh[0] - (xywh[2] / 2)
+        y1 = xywh[1] - (xywh[3] / 2)
+        x2 = xywh[0] + (xywh[2] / 2)
+        y2 = xywh[1] + (xywh[3] / 2)
+        return np.array([x1, y1, x2, y2])
 
 def box_to_polygon(x, y, size, yaw):
     corners = transform_3dbox2corners([x, y], size[:2], yaw)
@@ -170,42 +196,18 @@ def polygon_iou(poly1, poly2):
     union = poly1.union(poly2).area
     return inter / union if union > 0 else 0.0
 
-# def get_class_weights(class_id):
-#     # 클래스별 하이브리드 비중: (w1: ro_gdiou, w2: bev_gdiou)
-#     weights = {
-#         0: (0.7, 0.3),  # car
-#         1: (0.9, 0.1),  # pedestrian
-#         2: (0.8, 0.2),  # bicycle
-#         3: (0.8, 0.2),  # motorcycle
-#         4: (0.6, 0.4),  # bus
-#         5: (0.5, 0.5),  # trailer
-#         6: (0.6, 0.4),  # truck
-#     }
-#     return weights.get(class_id, (0.7, 0.3))
-
-# def get_class_weights(class_id):
-#     weights = {
-#         0: (0.5, 1.5),  # car
-#         1: (1.0, 1.0),  # pedestrian
-#         2: (1.0, 1.0),  # bicycle
-#         3: (1.0, 1.0),  # motorcycle
-#         4: (1.0, 1.0),  # bus
-#         5: (1.0, 1.0),  # trailer
-#         6: (1.0, 1.0),  # truck
-#     }
-#     return weights.get(class_id, (1.0, 1.0))
-
 def get_class_weights(class_id):
     weights = {
-        0: (0.7, 0.3),  # car
-        1: (0.9, 0.1),  # pedestrian (✓ keep)
-        2: (1.0, 1.0),  # bicycle     ← 강화
-        3: (1.0, 1.0),  # motorcycle  ← 강화
-        4: (0.6, 0.4),  # bus         (✓ keep)
-        5: (0.5, 0.5),  # trailer
-        6: (0.6, 0.4),  # truck
+        1: (0.5, 1.5),  # car
+        6: (1.0, 1.0),  # pedestrian (✓ keep)
+        8: (1.0, 1.0),  # bicycle     ← 강화
+        7: (1.0, 1.0),  # motorcycle  ← 강화
+        3: (0.6, 0.4),  # bus         (✓ keep)
+        4: (1.0, 1.0),  # trailer
+        2: (1.0, 1.0),  # truck
     }
     return weights.get(class_id, (0.7, 0.3))
+
 
 def cal_rotation_gdiou_inbev(box1, box2, yaw1, yaw2, class_id, center1, center2):
     """
@@ -239,20 +241,7 @@ def cal_rotation_gdiou_inbev(box1, box2, yaw1, yaw2, class_id, center1, center2)
     return hybrid_score
 
 # === Utility Functions ===
-def compute_yaw_similarity(yaw1, yaw2):
-    dyaw = abs(yaw1 - yaw2)
-    return max(0.0, np.cos(dyaw)) 
 
-def iou_2d(box1, box2):
-    w1, l1 = box1[0], box1[1]
-    w2, l2 = box2[0], box2[1]
-    if w1 <= 0 or l1 <= 0 or w2 <= 0 or l2 <= 0:
-        return 0.0
-    inter_w = min(w1, w2)
-    inter_l = min(l1, l2)
-    inter_area = inter_w * inter_l
-    union_area = w1 * l1 + w2 * l2 - inter_area
-    return inter_area / union_area if union_area > 0 else 0.0
 
 def bbox_iou_2d(bbox1, bbox2):
     if not bbox1 or not bbox2:
@@ -464,11 +453,6 @@ def _get_reproj_iou_thresh(label):
         return 0.3
     return 0.25
 
-
-# def _get_reproj_iou_thresh(label):
-#     # From official MCTrack config: THRESHOLD.RV.COST_THRE
-#     return -0.3
-
 # === Reprojection Matching Function ===
 def image_plane_matching(tracks, detections):
     matches = []
@@ -591,8 +575,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
 
     # ✅ cost threshold per class
     cost_thresholds = {
-        0: 1.10, 1: 2.06, 2: 2.00, 3: 2.06,
-        4: 1.60, 5: 1.26, 6: 1.16
+        1: 1.10, 6: 2.06, 8: 2.00, 7: 2.06,
+        3: 1.60, 4: 1.26, 2: 1.16
     }
     default_threshold = 2.2
 
@@ -669,145 +653,136 @@ class TrackState:
     DEAD = 4
 
 CLASS_NAME_MAP = {
-    0: "car", 1: "pedestrian", 2: "bicycle", 3: "motorcycle", 4: "bus",
-    5: "trailer", 6: "truck", 7: "ignore1", 8: "ignore2", 9: "barrier", 10: "cone"
+    1: "car", 6: "pedestrian", 8: "bicycle", 7: "motorcycle", 3: "bus",
+    4: "trailer", 2: "truck", 9: "barrier", 10: "cone", 5:"construction_vehicle",
 }
 # === 클래스별 칼만 필터 설정 (MCTRACK 완성 버전) ===
 CLASS_CONFIG = {
-    0: {  # car
-        "confirm_threshold": 1,
-        "max_unmatch": 0,
-        "max_predict_len": 17,
-        "expected_velocity": 10.0,
-        "P": np.diag([1.0, 1.0, 10.0, 10.0]),
-        "Q": np.diag([0.5, 0.5, 1.5, 1.5]),
-        "R": np.diag([0.7, 0.7]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    1: {  # car
+        'confirm_threshold': 1,
+        'max_unmatch': 0,
+        'max_predict_len': 17,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 10.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.5, 0.5, 1.5, 1.5]),
+        'R': np.diag([0.7, 0.7, 0.5, 0.5]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    1: {  # pedestrian
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 7,
-        "expected_velocity": 2.0,
-        "P": np.diag([1.0, 1.0, 10.0, 10.0]),
-        "Q": np.diag([1.5, 1.5, 1.5, 1.5]),
-        "R": np.diag([2.0, 2.0]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    6: {  # pedestrian
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 7,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 2.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([1.5, 1.5, 1.5, 1.5]),
+        'R': np.diag([2.0, 2.0, 3.5, 3.5]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    2: {  # bicycle
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 13,
-        "expected_velocity": 7.0,
-        "P": np.diag([1.0, 1.0, 1.0, 1.0]),
-        "Q": np.diag([0.3, 0.3, 1.0, 1.0]),
-        "R": np.diag([0.1, 0.1]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    8:  {  # bicycle
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 13,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 7.0,
+        'P': np.diag([1.0, 1.0, 1.0, 1.0]),
+        'Q': np.diag([0.3, 0.3, 1.0, 1.0]),
+        'R': np.diag([0.1, 0.1, 1.0, 1.0]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    3: {  # motorcycle
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 22,
-        "expected_velocity": 8.0,
-        "P": np.diag([1.0, 1.0, 10.0, 10.0]),
-        "Q": np.diag([0.5, 0.5, 4.0, 4.0]),
-        "R": np.diag([0.1, 0.1]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    7: {  # motorcycle
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 22,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 8.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.5, 0.5, 4.0, 4.0]),
+        'R': np.diag([0.1, 0.1, 0.1, 0.1]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    4: {  # bus
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 14,
-        "expected_velocity": 6.0,
-        "P": np.diag([100.0, 100.0, 100.0, 100.0]),
-        "Q": np.diag([0.5, 0.5, 1.5, 1.5]),
-        "R": np.diag([1.5, 1.5]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    3:  {  # bus
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 14,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 6.0,
+        'P': np.diag([100.0, 100.0, 100.0, 100.0]),
+        'Q': np.diag([0.5, 0.5, 1.5, 1.5]),
+        'R': np.diag([1.5, 1.5, 500.0, 500.0]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    5: {  # trailer
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 7,
-        "expected_velocity": 3.0,
-        "P": np.diag([1.0, 1.0, 10.0, 10.0]),
-        "Q": np.diag([0.3, 0.3, 0.1, 0.1]),
-        "R": np.diag([2.0, 2.0]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
+    4: {  # trailer
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 7,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 3.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.3, 0.3, 0.1, 0.1]),
+        'R': np.diag([2.0, 2.0, 2.5, 2.5]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
-    6: {  # truck
-        "confirm_threshold": 1,
-        "max_unmatch": 1,
-        "max_predict_len": 22,
-        "expected_velocity": 1.0,
-        "P": np.diag([1.0, 1.0, 10.0, 10.0]),
-        "Q": np.diag([0.1, 0.1, 2.0, 2.0]),
-        "R": np.diag([1.5, 1.5]),
-        "P_size": np.diag([1.0, 1.0, 10.0]),
-        "Q_size": np.diag([0.5, 0.5, 1.5]),
-        "R_size": np.diag([2.0, 2.0, 2.0]),
-        "P_yaw": np.diag([0.1, 0.1]),
-        "Q_yaw": np.diag([0.1, 0.1]),
-        "R_yaw": np.diag([0.2, 5.0]),
-    },
-    7: {
-        "confirm_threshold": 1000,   # 사실상 트랙 안 잡힘
-        "max_unmatch": 0,
-        "max_predict_len": 1,
-        "expected_velocity": 0.0,
-        "P": np.eye(4),
-        "Q": np.eye(4),
-        "R": np.eye(2),
-        "P_size": np.eye(3),
-        "Q_size": np.eye(3),
-        "R_size": np.eye(3),
-        "P_yaw": np.eye(2),
-        "Q_yaw": np.eye(2),
-        "R_yaw": np.eye(2),
-    },
-    8: {
-        "confirm_threshold": 1000,
-        "max_unmatch": 0,
-        "max_predict_len": 1,
-        "expected_velocity": 0.0,
-        "P": np.eye(4),
-        "Q": np.eye(4),
-        "R": np.eye(2),
-        "P_size": np.eye(3),
-        "Q_size": np.eye(3),
-        "R_size": np.eye(3),
-        "P_yaw": np.eye(2),
-        "Q_yaw": np.eye(2),
-        "R_yaw": np.eye(2),
+    2: {  # truck
+        'confirm_threshold': 1,
+        'max_unmatch': 1,
+        'max_predict_len': 22,
+        'confirmed_det_score': 0.7,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 1.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.1, 0.1, 2.0, 2.0]),
+        'R': np.diag([1.5, 1.5, 4.0, 4.0]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw': np.eye(2),
     },
 }
 
@@ -821,7 +796,7 @@ class KalmanTrackedObject:
         wlh = detection.get('size', [1.0, 1.0, 1.0])
         self.reproj_bbox = detection.get('reproj_bbox')
         self.traj_length = 1
-        self.use_smoothing = True  
+        self.use_smoothing = False  
         self.status_flag = TrackState.INITIALIZATION
         px, py = detection['position']
         vx, vy = detection.get("velocity", [0.0, 0.0])
@@ -844,7 +819,7 @@ class KalmanTrackedObject:
         else:
             self.pose_P = np.diag([1.0, 1.0, 10.0, 10.0])
             self.pose_Q = np.diag([0.5, 0.5, 1.5, 1.5])
-            self.pose_R = np.diag([0.7, 0.7])
+            self.pose_R = np.diag([0.7, 0.7, 1.0, 1.0]) 
             self.size_P = np.diag([1.0, 1.0, 1.0])
             self.size_Q = np.diag([0.1, 0.1, 0.1])
             self.size_R = np.diag([0.1, 0.1, 0.1])
@@ -863,6 +838,7 @@ class KalmanTrackedObject:
         self.hits = 1
         self.state = TrackState.CONFIRMED if self.hits >= self.confirm_threshold else TrackState.TENTATIVE
         self.soft_deleted = False
+        self.bboxes = []
 
     def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
         F = np.eye(4)
@@ -898,19 +874,56 @@ class KalmanTrackedObject:
         # Size prediction: static
         self.size_P = self.size_P + self.size_Q
 
+        # 새로운 confidence 값 계산 (여기서는 예시로 0.7로 설정, 실제 값은 업데이트 로직에 맞게 계산)
+        detection_score = self.tracking_score()  # 예시로 트래킹 점수를 기반으로 설정
+        confidence = max(0.0, min(1.0, detection_score))  # 0과 1 사이로 제한
+
+        pred_dict = {
+            "frame_id": -1,
+            "category": self.label,
+            "detection_score": confidence,  # 트래킹 신뢰도를 반영
+            "lwh": self.size.tolist(),
+            "global_xyz": self.pose_state[:2].tolist() + [0.0],
+            "global_orientation": [0, 0, 0, 1],
+            "global_yaw": self.yaw_state[0],
+            "global_velocity": self.pose_state[2:].tolist(),
+            "global_acceleration": [0.0, 0.0],
+            "bbox_image": {"x1y1x2y2": [0, 0, 0, 0]}
+        }
+
+        bbox_fields = {
+            "category": pred_dict["category"],
+            "detection_score": pred_dict["detection_score"],
+            "lwh": pred_dict["lwh"],
+            "global_xyz": pred_dict["global_xyz"],
+            "global_orientation": pred_dict["global_orientation"],
+            "global_yaw": pred_dict["global_yaw"],
+            "global_velocity": pred_dict["global_velocity"],
+            "global_acceleration": pred_dict["global_acceleration"],
+            "bbox_image": pred_dict["bbox_image"]
+        }
+        pred_bbox = BBox(frame_id=pred_dict["frame_id"], bbox=bbox_fields)
+        pred_bbox.is_fake = True
+        self.bboxes.append(pred_bbox)
+        if len(self.bboxes) > 30:
+            self.bboxes.pop(0)
+
         # ✅ 여기에 상태 전이 로직을 추가!
         if self.status_flag == TrackState.CONFIRMED and self.missed_count > self.max_missed:
             self.status_flag = TrackState.OBSCURED
 
-        if self.status_flag == TrackState.OBSCURED and self.missed_count > (self.max_missed + 10):
-            self.status_flag = TrackState.DEAD        
+        if self.status_flag == TrackState.OBSCURED and self.missed_count > (
+            self.max_missed + CLASS_CONFIG[self.label]["max_predict_len"]
+        ):
+            self.status_flag = TrackState.DEAD    
 
     def update(self, detection, dt):
-        # Pose update
-        z_pose = np.array([detection['position'][0], detection['position'][1]])
-        H_pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
+        pos = detection['position']
+        vel = detection.get('velocity', [0.0, 0.0])
+        z_pose = np.array([pos[0], pos[1], vel[0], vel[1]])
+        H_pose = np.eye(4)
         y_pose = z_pose - H_pose @ self.pose_state
-        S_pose = H_pose @ self.pose_P @ H_pose.T + self.pose_R[:2, :2]
+        S_pose = H_pose @ self.pose_P @ H_pose.T + self.pose_R
         K_pose = self.pose_P @ H_pose.T @ np.linalg.inv(S_pose)
         self.pose_state += K_pose @ y_pose
         self.pose_P = (np.eye(4) - K_pose @ H_pose) @ self.pose_P
@@ -919,42 +932,57 @@ class KalmanTrackedObject:
         vx, vy = self.pose_state[2], self.pose_state[3]
         speed = np.hypot(vx, vy)
         
-        # Yaw update
         z_yaw = np.array([detection['yaw'], 0.0])
-        H_yaw = np.array([[1, 0], [0, 1]])
+        H_yaw = np.eye(2)
         y_yaw = z_yaw - H_yaw @ self.yaw_state
         S_yaw = H_yaw @ self.yaw_P @ H_yaw.T + self.yaw_R
         K_yaw = self.yaw_P @ H_yaw.T @ np.linalg.inv(S_yaw)
         self.yaw_state += K_yaw @ y_yaw
         self.yaw_P = (np.eye(2) - K_yaw @ H_yaw) @ self.yaw_P
-
-        # Normalize yaw
         self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
 
-        # Reset flags
+        z_size = np.array(detection['size'][:2])
+        H_size = np.eye(2, 3)
+        y_size = z_size - H_size @ self.size_state
+        S_size = H_size @ self.size_P @ H_size.T + self.size_R
+        K_size = self.size_P @ H_size.T @ np.linalg.inv(S_size)
+        self.size_state += K_size @ y_size
+        self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P
+        self.size_state = np.clip(self.size_state, a_min=0.1, a_max=20.0)
+
         self.soft_deleted = False
         self.missed_count = 0
         self.hits += 1
         self.traj_length += 1
         if self.hits >= self.confirm_threshold:
             self.state = TrackState.CONFIRMED
-
-        # Size update
-        z_size = np.array(detection['size'][:3])
-        H_size = np.eye(3)
-        y_size = z_size - H_size @ self.size_state
-        S_size = H_size @ self.size_P @ H_size.T + self.size_R
-        K_size = self.size_P @ H_size.T @ np.linalg.inv(S_size)
-        self.size_state += K_size @ y_size
-        self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P
-        self.size_state = np.clip(self.size_state, a_min=0.1, a_max=20.0)    
-
         if self.traj_length > self.confirm_threshold or (
-            detection.get("score", 0.5) > 0.2 and self.hits > 1
+            detection.get("score", 0.0) > CLASS_CONFIG[self.label]["confirmed_det_score"] and
+            detection.get("score", 0.0) > CLASS_CONFIG[self.label]["confirmed_match_score"]
         ):
             self.status_flag = TrackState.CONFIRMED
 
         self.reproj_bbox = detection.get('reproj_bbox')
+        self.confidence = detection.get("confidence", 0.5)  # 기본값은 0.5로 설정
+
+        bbox_fields = {
+            "category": self.label,
+            "detection_score": self.confidence,  # confidence 값을 detection_score로 설정
+            "lwh": detection["size"],
+            "global_xyz": detection["position"] + [0.0],
+            "global_orientation": [0, 0, 0, 1],
+            "global_yaw": detection["yaw"],
+            "global_velocity": detection.get("velocity", [0.0, 0.0]),
+            "global_acceleration": [0.0, 0.0],
+            "bbox_image": {
+                "x1y1x2y2": detection.get("reproj_bbox", [0.0, 0.0, 0.0, 0.0])
+            }
+        }
+
+        new_bbox = BBox(frame_id=detection.get("id", 0), bbox=bbox_fields)
+        self.bboxes.append(new_bbox)
+        if len(self.bboxes) > 30:
+            self.bboxes.pop(0)
 
     def tracking_score(self):
         vel = np.hypot(self.pose_state[2], self.pose_state[3])
@@ -1174,9 +1202,12 @@ class KalmanMultiObjectTracker:
         results = []
 
         # ✅ 평가 대상 클래스만 기록 (NuScenes 기준)
-        VALID_LOG_LABELS = {0, 1, 2, 3, 4, 5, 6}
+        VALID_LOG_LABELS = {1, 2, 3, 4, 5, 6, 7, 8
+                            }
 
         for t in self.tracks:
+            if CLASS_CONFIG[t.label].get("is_filter_predict_box", -1) == 1 and t.hits == 0:
+                continue
             # 🔒 Confirmed 상태만
             if t.status_flag != TrackState.CONFIRMED:
                 continue
@@ -1189,30 +1220,26 @@ class KalmanMultiObjectTracker:
             # 🚫 평가 제외 클래스 무시
             if t.label not in VALID_LOG_LABELS:
                 continue
-            # 📉 신뢰도 낮은 트랙 제외
-            score = t.tracking_score()
-            # 👉 여기에 추가
-            # if t.label in [2, 3]:
-            #     score = t.tracking_score()
-            #     rospy.loginfo(f"[TRACK-SCORE] ID={t.id}, class={CLASS_NAME_MAP.get(t.label, '?')}, "
-            #           f"score={score:.3f}, traj_len={t.traj_length}, age={t.age:.2f}")
+            # # 📉 신뢰도 낮은 트랙 제외
+            # score = t.tracking_score()
+            # # 👉 여기에 추가
+            # # if t.label in [2, 3]:
+            # #     score = t.tracking_score()
+            # #     rospy.loginfo(f"[TRACK-SCORE] ID={t.id}, class={CLASS_NAME_MAP.get(t.label, '?')}, "
+            # #           f"score={score:.3f}, traj_len={t.traj_length}, age={t.age:.2f}")
 
-            min_score_thresholds = {
-                2: 0.10,  # bicycle
-                3: 0.10,  # motorcycle
-            }
-            default_threshold = 0.20
-
-            score_thresh = min_score_thresholds.get(t.label, default_threshold)
-            # if t.label in [2, 3]:
-            #     rospy.loginfo(f"[TRACK-CHECK] id={t.id}, class={t.label}, score={score:.3f}, threshold={score_thresh}")
-            if score < score_thresh:
-                continue
+        
+            # score_thresh = 0.3
+            # # if t.label in [2, 3]:
+            # #     rospy.loginfo(f"[TRACK-CHECK] id={t.id}, class={t.label}, score={score:.3f}, threshold={score_thresh}")
+            # if score < score_thresh:
+            #     continue
 
             # if t.label in [2, 3] and t.age < 1.0:
             #     rospy.loginfo(f"[SKIP] Early age for class={t.label}, id={t.id}, age={t.age:.2f}")
             #     continue
-
+            
+            score = t.confidence
             # ✅ 최종 트랙 저장
             x, y, yaw = t.x[0], t.x[1], t.x[3]
             size = t.size
@@ -1357,8 +1384,7 @@ class MCTrackTrackerNode:
             # 2) detection 변환 (VALID_CLASSES 필터링 포함)
             VALID_CLASSES = set(CLASS_CONFIG.keys())
             class_min_confidence = {
-                0: 0.15, 1: 0.16, 2: 0.20, 3: 0.15,
-                4: 0.16, 5: 0.17, 6: 0.0
+                1: 0.15, 2: 0.0, 3: 0.16, 4: 0.17, 6: 0.16, 7: 0.15, 8: 0.20,                 
             } 
             detections = []
             for i, obj in enumerate(msg.objects):
@@ -1379,6 +1405,8 @@ class MCTrackTrackerNode:
                     "size":         obj.size,
                     "type":         obj.label,
                     "reproj_bbox":  obj.bbox_image,
+                    "velocity":     [obj.vel_x, obj.vel_y], 
+                    "confidence":   obj.score  # 이 부분을 추가
                 }
                 if det["reproj_bbox"] == [0,0,0,0]:
                     rospy.logwarn(f"[RV-Match][INVALID] Detection ID {i} has empty bbox_image")
@@ -1416,10 +1444,10 @@ class MCTrackTrackerNode:
             self.tracking_pub.publish(ta)
             rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
 
-            debug_track_vs_gt(tracks, gt_tracks, "bicycle")
-            debug_track_vs_gt(tracks, gt_tracks, "motorcycle")
-            compute_track_recall(tracks, gt_tracks, "bicycle")
-            compute_track_recall(tracks, gt_tracks, "motorcycle")
+            # debug_track_vs_gt(tracks, gt_tracks, "bicycle")
+            # debug_track_vs_gt(tracks, gt_tracks, "motorcycle")
+            # compute_track_recall(tracks, gt_tracks, "bicycle")
+            # compute_track_recall(tracks, gt_tracks, "motorcycle")
             # 6) RViz 시각화
             vis_header = Header(frame_id="map", stamp=rospy.Time.now())
             self.vis_pub.publish(create_tracking_markers(tracks, vis_header))
