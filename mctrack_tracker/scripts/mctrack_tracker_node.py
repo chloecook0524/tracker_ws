@@ -15,7 +15,9 @@ import traceback
 from typing import List, Dict
 from shapely.geometry import Polygon
 from tf.transformations import euler_from_quaternion
-
+from lap import lapjv
+import cv2
+import math
 
 # === Global Path to Baseversion Detection File ===
 BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
@@ -72,8 +74,37 @@ class BBox:
         y2 = xywh[1] + (xywh[3] / 2)
         return np.array([x1, y1, x2, y2])
 
+    def transform_3dbox2corners(self, global_xyz_lwh_yaw) -> np.ndarray:
+        from pyquaternion import Quaternion  # ensure imported
+
+        x, y, z, l, w, h, rot = global_xyz_lwh_yaw
+        orientation = Quaternion(axis=[0, 0, 1], radians=rot)
+        dx1, dx2, dy1, dy2, dz1, dz2 = (
+            l / 2.0,
+            l / 2.0,
+            w / 2.0,
+            w / 2.0,
+            h / 2.0,
+            h / 2.0,
+        )
+        x_corners = np.array([dx1, dx1, dx1, dx1, dx2, dx2, dx2, dx2]) * np.array(
+            [1, 1, 1, 1, -1, -1, -1, -1]
+        )
+        y_corners = np.array([dy1, dy2, dy2, dy1, dy1, dy2, dy2, dy1]) * np.array(
+            [1, -1, -1, 1, 1, -1, -1, 1]
+        )
+        z_corners = np.array([dz1, dz1, dz2, dz2, dz1, dz1, dz2, dz2]) * np.array(
+            [1, 1, -1, -1, 1, 1, -1, -1]
+        )
+        corners = np.vstack((x_corners, y_corners, z_corners))
+        corners = np.dot(orientation.rotation_matrix, corners)
+        corners[0, :] += x
+        corners[1, :] += y
+        corners[2, :] += z
+        return corners.T   
+
 def box_to_polygon(x, y, size, yaw):
-    corners = transform_3dbox2corners([x, y], size[:2], yaw)
+    corners = compute_bev_corners([x, y], size[:2], yaw)
     return Polygon(corners)
 
 
@@ -153,7 +184,29 @@ def compute_track_recall(tracks, gt_tracks, class_name, iou_thresh=0.5):
     recall = len(matched_gt) / len(gt_objs) if gt_objs else 0.0
     rospy.loginfo(f"[RECALL] {class_name} matched: {len(matched_gt)}/{len(gt_objs)} (Recall={recall:.3f})")
 
-def transform_3dbox2corners(center, size, yaw):
+def cal_rotation_iou_inbev(pose1, pose2):
+    import cv2
+    box1 = np.array([pose1[0], pose1[1], pose1[3], pose1[4], pose1[6] * 180 / np.pi])
+    box2 = np.array([pose2[0], pose2[1], pose2[3], pose2[4], pose2[6] * 180 / np.pi])
+    base_xy = np.array(box1[:2])
+    box1[:2] -= base_xy
+    box2[:2] -= base_xy
+    area1 = pose1[3] * pose1[4]
+    area2 = pose2[3] * pose2[4]
+    box1_inp = ((box1[0], box1[1]), (box1[2], box1[3]), box1[4])
+    box2_inp = ((box2[0], box2[1]), (box2[2], box2[3]), box2[4])
+
+    int_pts = cv2.rotatedRectangleIntersection(tuple(box1_inp), tuple(box2_inp))[1]
+    if int_pts is not None:
+        order_pts = cv2.convexHull(int_pts, returnPoints=True)
+        union = cv2.contourArea(order_pts)
+        iou = union / (area1 + area2 - union)
+    else:
+        iou = 0.0
+        union = 0.0
+    return iou, union
+
+def compute_bev_corners(center, size, yaw):
     """
     3D 박스의 중심 (x, y), 크기 (w, l), yaw 회전값을 받아
     BEV 상의 4개 코너 좌표를 반환합니다. (회전 적용)
@@ -209,39 +262,11 @@ def get_class_weights(class_id):
     return weights.get(class_id, (0.7, 0.3))
 
 
-def cal_rotation_gdiou_inbev(box1, box2, yaw1, yaw2, class_id, center1, center2):
-    """
-    하이브리드 코스트 함수 (Ro-GDIoU + BEV GDIoU).
-    
-    Parameters:
-    - box1, box2: [w, l]
-    - yaw1, yaw2: 각도 (radian)
-    - class_id: 객체 클래스 (0~6)
-    - center1, center2: 중심 좌표 [x, y]
-    """
-    # 1. BEV IoU 계산
-    corners1 = transform_3dbox2corners(center1, box1, yaw1)
-    corners2 = transform_3dbox2corners(center2, box2, yaw2)
-    bev_iou = polygon_iou(corners1, corners2)
-
-    # 2. yaw 차이에 대한 cosine penalty
-    yaw_diff = abs(yaw1 - yaw2)
-    yaw_penalty = 1.0 - np.cos(yaw_diff)
-
-    # 3. BEV GDIoU 보정
-    bev_gdiou = bev_iou - 0.1 * yaw_penalty
-    bev_gdiou = max(0.0, bev_gdiou)
-
-    # 4. 기존 Ro-GDIoU 계산
-    ro_iou = ro_gdiou_2d(box1, box2, yaw1, yaw2)
-
-    # 5. 클래스별 가중 평균
-    w1, w2 = get_class_weights(class_id)
-    hybrid_score = w1 * ro_iou + w2 * bev_gdiou
-    return hybrid_score
-
 # === Utility Functions ===
 
+def orientation_similarity(angle1_rad, angle2_rad):
+    cosine_similarity = math.cos((angle1_rad - angle2_rad + np.pi) % (2 * np.pi) - np.pi)
+    return (cosine_similarity + 1.0) / 2.0
 
 def bbox_iou_2d(bbox1, bbox2):
     if not bbox1 or not bbox2:
@@ -370,6 +395,50 @@ def create_gt_markers(gt_tracks, header):
 
         markers.markers.append(m)
     return markers
+
+
+def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
+    if cal_flag == "Predict":
+        pose1 = box_trk.bboxes[-1].global_xyz_lwh_yaw_predict
+        pose2 = box_det.global_xyz_lwh_yaw
+    elif cal_flag == "BackPredict":
+        pose1 = box_trk.bboxes[-1].global_xyz_lwh_yaw_fusion
+        pose2 = box_det.global_xyz_lwh_yaw_last
+    else:
+        raise ValueError(f"Unexpected cal_flag value: {cal_flag}")
+
+    corners1 = box_trk.bboxes[-1].transform_3dbox2corners(pose1)
+    corners2 = box_det.transform_3dbox2corners(pose2)
+    bev_idxes = [2, 3, 7, 6]
+    bev_corners1 = corners1[bev_idxes, 0:2]
+    bev_corners2 = corners2[bev_idxes, 0:2]
+    pose1 = np.copy(pose1)
+    pose2 = np.copy(pose2)
+    iou, inter_area = cal_rotation_iou_inbev(pose1, pose2)
+    union_points = np.concatenate([bev_corners1, bev_corners2], axis=0).astype(np.float64)
+    union_points -= pose1[:2].reshape(1, 2)
+    rect = cv2.minAreaRect(union_points.astype(np.float32))
+    universe_area = rect[1][0] * rect[1][1]
+    a_area = pose1[3] * pose1[4]
+    b_area = pose2[3] * pose2[4]
+    extra_area = universe_area - (a_area + b_area - inter_area)
+    box_center_distance = (pose1[0] - pose2[0]) ** 2 + (pose1[1] - pose2[1]) ** 2
+    union_distance = np.linalg.norm(np.array(rect[1])) ** 2
+    box_trk_volume = pose1[3] * pose1[4] * pose1[5]
+    box_det_volume = pose2[3] * pose2[4] * pose2[5]
+    volume_ratio = (
+        box_trk_volume / box_det_volume if box_trk_volume >= box_det_volume else box_det_volume / box_trk_volume
+    )
+    angle_ratio = orientation_similarity(pose1[6], pose2[6])
+    w1, w2 = get_class_weights(class_id)
+
+    ro_gdiou = (
+        iou
+        - w1 * extra_area / universe_area
+        - w2 * box_center_distance / union_distance
+    )
+
+    return ro_gdiou
 
 def sdiou_2d(bbox1, bbox2):
     """Scale-Dependent IoU"""
@@ -559,28 +628,21 @@ def image_plane_matching_sdiou(tracks, detections):
     return matches, list(unmatched_dets), list(unmatched_tracks)
 
 
-
-
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
 def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
     if not tracks or not detections:
         rospy.logwarn("[Hungarian Matching] No tracks or detections available!")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
-    # ✅ 유효 클래스 ID 정의 (CLASS_CONFIG 기준)
     VALID_CLASS_IDS = set(CLASS_CONFIG.keys())
-
-    # ✅ detection 내 유효 class만 유지
     detections = [d for d in detections if d["type"] in VALID_CLASS_IDS]
 
-    # ✅ cost threshold per class
     cost_thresholds = {
         1: 1.10, 6: 2.06, 8: 2.00, 7: 2.06,
         3: 1.60, 4: 1.26, 2: 1.16
     }
     default_threshold = 2.2
 
-    # ✅ Hungarian 이전에 max_predict_len 기준 pruning 적용 (KeyError 방지 포함)
     valid_tracks = [
         t for t in tracks
         if t.label in CLASS_CONFIG and
@@ -589,30 +651,33 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
     if not valid_tracks:
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
-    cost_matrix = np.ones((len(valid_tracks), len(detections))) * 1e6  # large default cost
+    cost_matrix = np.ones((len(valid_tracks), len(detections))) * 1e6  # 초기 large cost
 
     for i, track in enumerate(valid_tracks):
         for j, det in enumerate(detections):
             if det["type"] != track.label:
                 continue
-
             box1 = track.size[:2]
             box2 = det["size"][:2]
             center1 = track.x[:2]
             center2 = det["position"]
-            class_id = track.label
+            dist = np.hypot(center1[0] - center2[0], center1[1] - center2[1])
 
-            dx = center1[0] - center2[0]
-            dy = center1[1] - center2[1]
-            dist = np.hypot(dx, dy)
-
-            # ✂️ 거리 pruning (hybrid only)
             if use_hybrid_cost and dist > 10.0:
                 continue
 
-            # ✳️ Hybrid or simple cost function
             iou_score = (
-                cal_rotation_gdiou_inbev(box1, box2, track.x[3], det["yaw"], class_id, center1, center2)
+                cal_rotation_gdiou_inbev(track, BBox(frame_id=-1, bbox={
+                    "category": det["type"],
+                    "detection_score": det.get("confidence", 0.5),
+                    "lwh": det["size"],
+                    "global_xyz": det["position"] + [0.0],
+                    "global_orientation": [0, 0, 0, 1],
+                    "global_yaw": det["yaw"],
+                    "global_velocity": det.get("velocity", [0.0, 0.0]),
+                    "global_acceleration": [0.0, 0.0],
+                    "bbox_image": {"x1y1x2y2": det.get("reproj_bbox", [0, 0, 0, 0])}
+                }), det["type"], cal_flag="Predict")
                 if use_hybrid_cost else
                 ro_gdiou_2d(box1, box2, track.x[3], det["yaw"])
             )
@@ -621,20 +686,38 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
             dist_cost = dist
             cost_matrix[i, j] = iou_cost + 0.5 * dist_cost
 
-    # Hungarian assignment
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    matches, unmatched_tracks, unmatched_dets = [], set(range(len(tracks))), set(range(len(detections)))
+    # lapjv requires square matrix or extend_cost=True
+    try:
+        res = lapjv(cost_matrix, extend_cost=True, cost_limit=default_threshold)
+    except Exception as e:
+        rospy.logerr(f"[Hungarian] lapjv failed: {e}")
+        return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
-    for r, c in zip(row_ind, col_ind):
+    if not isinstance(res, tuple) or len(res) != 3:
+        rospy.logwarn("[Hungarian] lapjv 결과 형식 오류")
+        return [], list(range(len(detections))), list(range(len(tracks))), [], []
+
+    total_cost, row_ind, col_ind = res
+    # rospy.loginfo(f"[DEBUG] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
+    # rospy.loginfo(f"[DEBUG] cost_matrix shape: {cost_matrix.shape}")
+
+    matches = []
+    unmatched_tracks = set(range(len(tracks)))
+    unmatched_dets = set(range(len(detections)))
+
+    for r, c in enumerate(row_ind):
+        if c == -1 or r >= len(valid_tracks) or c >= len(detections):
+            continue
         track = valid_tracks[r]
         track_idx = tracks.index(track)
         label = track.label
         threshold = cost_thresholds.get(label, default_threshold)
-        box1 = track.size[:2]
-        box2 = detections[c]["size"][:2]
-        ro_iou = ro_gdiou_2d(box1, box2, track.x[3], detections[c]["yaw"])
+        ro_iou = ro_gdiou_2d(track.size[:2], detections[c]["size"][:2], track.x[3], detections[c]["yaw"])
+        cost = cost_matrix[r, c]
 
-        if cost_matrix[r, c] < threshold and ro_iou > 0.1:
+        # rospy.loginfo(f"[CostCheck] Class {label}, cost={cost:.3f}, threshold={threshold}, ro_gdiou={ro_iou:.3f}")
+
+        if cost < threshold and ro_iou > 0.1:
             matches.append((track_idx, c))
             unmatched_tracks.discard(track_idx)
             unmatched_dets.discard(c)
@@ -651,6 +734,7 @@ class TrackState:
     CONFIRMED = 1
     OBSCURED = 2
     DEAD = 4
+
 
 CLASS_NAME_MAP = {
     1: "car", 6: "pedestrian", 8: "bicycle", 7: "motorcycle", 3: "bus",
@@ -797,7 +881,10 @@ class KalmanTrackedObject:
         self.reproj_bbox = detection.get('reproj_bbox')
         self.traj_length = 1
         self.use_smoothing = False  
-        self.status_flag = TrackState.INITIALIZATION
+        self.status_flag = TrackState.INITIALIZATION 
+        self.hits = 1
+        # self.state = TrackState.CONFIRMED if self.hits >= self.confirm_threshold else TrackState.TENTATIVE
+        # self.status_flag = TrackState.INITIALIZATION
         px, py = detection['position']
         vx, vy = detection.get("velocity", [0.0, 0.0])
         self.pose_state = np.array([px, py, vx, vy])
@@ -835,8 +922,6 @@ class KalmanTrackedObject:
         self.size_state = np.array(wlh[:3])
         self.age = 0.0
         self.missed_count = 0
-        self.hits = 1
-        self.state = TrackState.CONFIRMED if self.hits >= self.confirm_threshold else TrackState.TENTATIVE
         self.soft_deleted = False
         self.bboxes = []
 
@@ -907,7 +992,6 @@ class KalmanTrackedObject:
         self.bboxes.append(pred_bbox)
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
-
         # ✅ 여기에 상태 전이 로직을 추가!
         if self.status_flag == TrackState.CONFIRMED and self.missed_count > self.max_missed:
             self.status_flag = TrackState.OBSCURED
@@ -917,7 +1001,8 @@ class KalmanTrackedObject:
         ):
             self.status_flag = TrackState.DEAD    
 
-    def update(self, detection, dt):
+
+    def update(self, detection, dt, matched_score):
         pos = detection['position']
         vel = detection.get('velocity', [0.0, 0.0])
         z_pose = np.array([pos[0], pos[1], vel[0], vel[1]])
@@ -1023,19 +1108,14 @@ class KalmanMultiObjectTracker:
 
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
     def _reid_soft_deleted_tracks(self,
-                              unmatched_dets: List[int],
-                              detections: List[Dict],
-                              dt: float) -> List[int]:
-        """
-        Try to resurrect (re-ID) any soft_deleted tracks by matching to
-        remaining detections using Ro-GDIoU + reproj-IoU filtering.
-        """
+                                unmatched_dets: List[int],
+                                detections: List[Dict],
+                                dt: float) -> List[int]:
         used = []
         for di in unmatched_dets:
             det = detections[di]
             label = det['type']
 
-            # ✅ 유효 클래스 아니면 건너뜀
             if label not in CLASS_CONFIG:
                 continue
 
@@ -1046,27 +1126,19 @@ class KalmanMultiObjectTracker:
                     continue
                 if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
                     continue
-                # ✅ soft-deleted 아니거나 class 불일치하면 무시
                 if not getattr(track, 'soft_deleted', False):
                     continue
                 if track.label != label:
                     continue
-                if track.label not in CLASS_CONFIG:
-                    continue
-                if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
-                    continue
 
-                # 거리 기반 필터링
                 dx = track.pose_state[0] - det["position"][0]
                 dy = track.pose_state[1] - det["position"][1]
                 if np.hypot(dx, dy) > _get_class_distance_threshold(label):
                     continue
 
-                # 코스트 계산
                 score = ro_gdiou_2d(track.size[:2], det['size'][:2],
                                     track.yaw_state[0], det['yaw'])
 
-                # bbox 보조 필터링
                 bbox1 = getattr(track, 'reproj_bbox', None)
                 bbox2 = det.get('reproj_bbox', None)
                 if bbox1 and bbox2 and bbox_iou_2d(bbox1, bbox2) < 0.1:
@@ -1078,7 +1150,8 @@ class KalmanMultiObjectTracker:
 
             if best_track is not None:
                 best_track.soft_deleted = False
-                best_track.update(det, dt)
+                confidence = det.get("confidence", 0.5)
+                best_track.update(det, dt, matched_score=confidence)
                 best_track.hits += 1
                 used.append(di)
 
@@ -1086,10 +1159,10 @@ class KalmanMultiObjectTracker:
 
 
     def _fallback_match(self,
-                    unmatched_trks: List[int],
-                    unmatched_dets: List[int],
-                    detections: List[Dict],
-                    dt: float) -> List[int]:
+                        unmatched_trks: List[int],
+                        unmatched_dets: List[int],
+                        detections: List[Dict],
+                        dt: float) -> List[int]:
         used = []
         for ti in unmatched_trks:
             track = self.tracks[ti]
@@ -1097,7 +1170,6 @@ class KalmanMultiObjectTracker:
                 continue
             if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
                 continue
-
 
             best_score = -1.0
             best_det = -1
@@ -1122,7 +1194,9 @@ class KalmanMultiObjectTracker:
                     best_det = di
 
             if best_det >= 0:
-                self.tracks[ti].update(detections[best_det], dt)
+                matched_det = detections[best_det]
+                confidence = matched_det.get("confidence", 0.5)
+                self.tracks[ti].update(matched_det, dt, matched_score=confidence)
                 used.append(best_det)
 
         return used
@@ -1142,7 +1216,7 @@ class KalmanMultiObjectTracker:
             matches_h, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
                 hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost)
             for tr, det in zip(matched_trks, matched_dets):
-                tr.update(det, dt)
+                tr.update(det, dt, matched_score=det.get("confidence", 0.5))
 
         # 2) SDIoU (RV) matching — only if enabled
         if self.use_rv_matching and unmatched_trks and unmatched_dets:
@@ -1258,6 +1332,7 @@ class KalmanMultiObjectTracker:
             })
 
         return results
+ 
 
 class MCTrackTrackerNode:
     def __init__(self):

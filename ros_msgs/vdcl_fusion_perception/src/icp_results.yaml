@@ -1,0 +1,21 @@
+master:
+  pitch: -0.5
+  roll: 0.0
+  x: 1.45
+  y: 0.04
+  yaw: -2.1
+  z: 1.73
+velodyne_FL:
+  pitch: 32.19
+  roll: -0.16
+  x: 1.05
+  y: 0.59
+  yaw: 87.83
+  z: 1.6
+velodyne_FR:
+  pitch: 38.11
+  roll: 0.37
+  x: 1.0
+  y: -0.59
+  yaw: -89.13
+  z: 1.58

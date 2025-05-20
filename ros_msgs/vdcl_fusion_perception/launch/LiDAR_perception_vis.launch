@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <node pkg="vdcl_lidar_perception" type="DaT_visualizer.py" name="DaT_vis_node" output="screen">
+    <env name="PYTHONPATH" value="/home/sgsp/venvs/LiDAR_DaT/lib/python3.8/site-packages:/home/sgsp/vdcl_ros/Workspace/devel/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:${PYTHONPATH}" /> 
+  </node>
+
+</launch>
+
