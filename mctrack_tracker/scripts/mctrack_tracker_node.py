@@ -18,10 +18,14 @@ from tf.transformations import euler_from_quaternion
 from lap import lapjv
 import cv2
 import math
+from vdcl_fusion_perception.msg import DetectionObjects
+from chassis_msgs.msg import Chassis
+from pyquaternion import Quaternion
+from geometry_msgs.msg import Point
 
-# === Global Path to Baseversion Detection File ===
-BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
-GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
+# # === Global Path to Baseversion Detection File ===
+# BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
+# GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
 
 # === BBox 클래스 (bbox.py 내용 통합) ===
 class BBox:
@@ -108,81 +112,81 @@ def box_to_polygon(x, y, size, yaw):
     return Polygon(corners)
 
 
-def debug_track_vs_gt(tracks, gt_tracks, class_name):
-    # rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] GT 매칭 시작...")
+# def debug_track_vs_gt(tracks, gt_tracks, class_name):
+#     # rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] GT 매칭 시작...")
 
-    class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
-    if not class_id:
-        rospy.logwarn(f"[DEBUG] class_name={class_name} not found in CLASS_NAME_MAP")
-        return
-    class_id = class_id[0]
+#     class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
+#     if not class_id:
+#         rospy.logwarn(f"[DEBUG] class_name={class_name} not found in CLASS_NAME_MAP")
+#         return
+#     class_id = class_id[0]
 
-    pred_tracks = [t for t in tracks if t["type"] == class_id]
-    gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
+#     pred_tracks = [t for t in tracks if t["type"] == class_id]
+#     gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
 
-    for pt in pred_tracks:
-        px, py = pt["x"], pt["y"]
-        psize = pt["size"]
-        pyaw = pt["yaw"]
-        ppoly = box_to_polygon(px, py, psize, pyaw)
+#     for pt in pred_tracks:
+#         px, py = pt["x"], pt["y"]
+#         psize = pt["size"]
+#         pyaw = pt["yaw"]
+#         ppoly = box_to_polygon(px, py, psize, pyaw)
 
-        matched = False
+#         matched = False
 
-        for gt in gt_objs:
-            gx, gy = gt["translation"][:2]
-            gsize = gt["size"]
-            gyaw = quaternion_to_yaw(gt)
-            gpoly = box_to_polygon(gx, gy, gsize, gyaw)
+#         for gt in gt_objs:
+#             gx, gy = gt["translation"][:2]
+#             gsize = gt["size"]
+#             gyaw = quaternion_to_yaw(gt)
+#             gpoly = box_to_polygon(gx, gy, gsize, gyaw)
 
-            dist = np.hypot(px - gx, py - gy)
-            iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area if (ppoly.is_valid and gpoly.is_valid) else 0.0
-            yaw_error = np.abs(np.arctan2(np.sin(pyaw - gyaw), np.cos(pyaw - gyaw)))
+#             dist = np.hypot(px - gx, py - gy)
+#             iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area if (ppoly.is_valid and gpoly.is_valid) else 0.0
+#             yaw_error = np.abs(np.arctan2(np.sin(pyaw - gyaw), np.cos(pyaw - gyaw)))
 
-            rospy.loginfo(f"[{class_name.upper()}] Track ID={pt['id']} ↔ GT dist={dist:.2f}m, yaw_diff={yaw_error:.2f}rad, IoU={iou:.3f}")
-            rospy.loginfo(f"   ↪ Track size={psize}, yaw={pyaw:.2f}, GT size={gsize}, yaw={gyaw:.2f}")
-            if not ppoly.is_valid or not gpoly.is_valid:
-                rospy.logwarn(f"[POLY-INVALID] Track ID={pt['id']} has invalid polygon.")
-            if dist < 10.0 and iou < 0.05:
-                rospy.logwarn(f"[NO-MATCH] distance OK ({dist:.2f}m) but IoU too low → yaw misalign or size mismatch?")
-            if iou >= 0.5:
-                matched = True
-                break
+#             rospy.loginfo(f"[{class_name.upper()}] Track ID={pt['id']} ↔ GT dist={dist:.2f}m, yaw_diff={yaw_error:.2f}rad, IoU={iou:.3f}")
+#             rospy.loginfo(f"   ↪ Track size={psize}, yaw={pyaw:.2f}, GT size={gsize}, yaw={gyaw:.2f}")
+#             if not ppoly.is_valid or not gpoly.is_valid:
+#                 rospy.logwarn(f"[POLY-INVALID] Track ID={pt['id']} has invalid polygon.")
+#             if dist < 10.0 and iou < 0.05:
+#                 rospy.logwarn(f"[NO-MATCH] distance OK ({dist:.2f}m) but IoU too low → yaw misalign or size mismatch?")
+#             if iou >= 0.5:
+#                 matched = True
+#                 break
 
-        # if not matched:
-        #     rospy.logwarn(f"[MISS] No matching GT for Track ID={pt['id']} (class={class_name})")
+#         # if not matched:
+#         #     rospy.logwarn(f"[MISS] No matching GT for Track ID={pt['id']} (class={class_name})")
 
-    rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] 완료. 트랙 수={len(pred_tracks)}, GT 수={len(gt_objs)}")
+#     rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] 완료. 트랙 수={len(pred_tracks)}, GT 수={len(gt_objs)}")
 
-def compute_track_recall(tracks, gt_tracks, class_name, iou_thresh=0.5):
-    class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
-    if not class_id:
-        return
-    class_id = class_id[0]
+# def compute_track_recall(tracks, gt_tracks, class_name, iou_thresh=0.5):
+#     class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
+#     if not class_id:
+#         return
+#     class_id = class_id[0]
 
-    pred_tracks = [t for t in tracks if t["type"] == class_id]
-    gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
+#     pred_tracks = [t for t in tracks if t["type"] == class_id]
+#     gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
 
-    matched_gt = set()
-    for pt in pred_tracks:
-        px, py = pt["x"], pt["y"]
-        psize = pt["size"]
-        pyaw = pt["yaw"]
-        ppoly = box_to_polygon(px, py, psize, pyaw)
+#     matched_gt = set()
+#     for pt in pred_tracks:
+#         px, py = pt["x"], pt["y"]
+#         psize = pt["size"]
+#         pyaw = pt["yaw"]
+#         ppoly = box_to_polygon(px, py, psize, pyaw)
 
-        for i, gt in enumerate(gt_objs):
-            gx, gy = gt["translation"][:2]
-            gsize = gt["size"]
-            gyaw = quaternion_to_yaw(gt)
-            gpoly = box_to_polygon(gx, gy, gsize, gyaw)
-            if not gpoly.is_valid or not ppoly.is_valid:
-                continue
-            iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area
-            if iou >= iou_thresh:
-                matched_gt.add(i)
-                break  # 한 GT와 매칭되면 종료
+#         for i, gt in enumerate(gt_objs):
+#             gx, gy = gt["translation"][:2]
+#             gsize = gt["size"]
+#             gyaw = quaternion_to_yaw(gt)
+#             gpoly = box_to_polygon(gx, gy, gsize, gyaw)
+#             if not gpoly.is_valid or not ppoly.is_valid:
+#                 continue
+#             iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area
+#             if iou >= iou_thresh:
+#                 matched_gt.add(i)
+#                 break  # 한 GT와 매칭되면 종료
 
-    recall = len(matched_gt) / len(gt_objs) if gt_objs else 0.0
-    rospy.loginfo(f"[RECALL] {class_name} matched: {len(matched_gt)}/{len(gt_objs)} (Recall={recall:.3f})")
+#     recall = len(matched_gt) / len(gt_objs) if gt_objs else 0.0
+#     rospy.loginfo(f"[RECALL] {class_name} matched: {len(matched_gt)}/{len(gt_objs)} (Recall={recall:.3f})")
 
 def cal_rotation_iou_inbev(pose1, pose2):
     import cv2
@@ -281,120 +285,160 @@ def bbox_iou_2d(bbox1, bbox2):
     union = area1 + area2 - inter_area
     return inter_area / union if union > 0 else 0.0
 
-def create_tracking_markers(tracks, header):
-    markers = MarkerArray()
-    for i, t in enumerate(tracks):
-        # box (cube)
-        m = Marker()
-        m.header = header
-        m.ns = "track_boxes"
-        m.id = i
-        m.type = Marker.CUBE
-        m.action = Marker.ADD
-        m.pose.position.x = t["x"]
-        m.pose.position.y = t["y"]
-        m.pose.position.z = 1.0  # 중간 높이
+def create_ego_marker(stamp):
+    marker = Marker()
+    marker.header.frame_id = "vehicle"
+    marker.header.stamp = stamp
+    marker.ns = "ego_vehicle"
+    marker.id = 9999
+    marker.type = Marker.MESH_RESOURCE
+    marker.action = Marker.ADD
+    marker.mesh_resource = "package://vdcl_fusion_perception/marker_dae/Car.dae"
+    marker.mesh_use_embedded_materials = True
 
-        from tf.transformations import quaternion_from_euler
-        q = quaternion_from_euler(0, 0, t["yaw"])
-        m.pose.orientation.x = q[0]
-        m.pose.orientation.y = q[1]
-        m.pose.orientation.z = q[2]
-        m.pose.orientation.w = q[3]
+    marker.pose.position.x = 0.0
+    marker.pose.position.y = 0.0
+    marker.pose.position.z = 0.0
 
-        m.scale.x = t["size"][0]
-        m.scale.y = t["size"][1]
-        m.scale.z = t["size"][2] if len(t["size"]) > 2 else 1.5
+    quaternion = Quaternion(axis=[0, 0, 1], angle=0)
+    marker.pose.orientation.w = quaternion[0]
+    marker.pose.orientation.x = quaternion[1]
+    marker.pose.orientation.y = quaternion[2]
+    marker.pose.orientation.z = quaternion[3]
 
-        m.color.a = 0.5
-        m.color.r = 1.0
-        m.color.g = 1.0
-        m.color.b = 0.0
-        markers.markers.append(m)
+    marker.scale.x = 4.0
+    marker.scale.y = 2.0
+    marker.scale.z = 2.0
 
-        # text
-        t_m = Marker()
-        t_m.header = header
-        t_m.ns = "track_ids"
-        t_m.id = 1000 + i
-        t_m.type = Marker.TEXT_VIEW_FACING
-        t_m.action = Marker.ADD
-        t_m.pose.position.x = t["x"]
-        t_m.pose.position.y = t["y"]
-        t_m.pose.position.z = 2.5
-        t_m.scale.z = 0.8
-        t_m.color.a = 1.0
-        t_m.color.r = 1.0
-        t_m.color.g = 1.0
-        t_m.color.b = 1.0
-        t_m.text = str(t["id"])
-        markers.markers.append(t_m)
+    marker.color.a = 1.0
+    marker.color.r = 0.0
+    marker.color.g = 1.0
+    marker.color.b = 0.0
+    marker.lifetime = rospy.Duration(0.2)
 
-    return markers
+    return marker
 
-def quaternion_to_yaw(obj):
-    """
-    GT object에서 rotation(quaternion) → yaw(rad) 로 변환
-    (NuScenes [w, x, y, z] 순서를 [x, y, z, w]로 변환 후 yaw 추출)
-    bicycle / motorcycle 클래스만 출력
-    """
-    rotation = obj.get("rotation", None)
-    name = obj.get("tracking_name", "")
     
-    if rotation and isinstance(rotation, list) and len(rotation) == 4:
-        try:
-            w, x, y, z = rotation
-            q = [x, y, z, w]
-            _, _, yaw = euler_from_quaternion(q)
+def create_single_track_marker(track, header, marker_id):
+    m = Marker()
+    m.header = header
+    m.ns = "track_meshes"
+    m.id = marker_id
+    m.action = Marker.ADD
+    m.type = Marker.MESH_RESOURCE
+    m.mesh_use_embedded_materials = True
+    m.pose.position.x = track["x"]
+    m.pose.position.y = track["y"]
+    m.pose.position.z = track["size"][2] / 2.0
+    q = tf.transformations.quaternion_from_euler(0, 0, track["yaw"])
+    m.pose.orientation.x = q[0]
+    m.pose.orientation.y = q[1]
+    m.pose.orientation.z = q[2]
+    m.pose.orientation.w = q[3]
+    m.scale.x = track["size"][0]
+    m.scale.y = track["size"][1]
+    m.scale.z = track["size"][2]
+    m.color.a = min(track["confidence"] * 5, 1.0)
+    m.lifetime = rospy.Duration(0.2)
+    m.color.r = 1.0
+    m.color.g = 1.0
+    m.color.b = 1.0
+    class_mesh_paths = {
+        1: "package://vdcl_fusion_perception/marker_dae/Car.dae",
+        2: "package://vdcl_fusion_perception/marker_dae/Truck.dae",
+        3: "package://vdcl_fusion_perception/marker_dae/Bus.dae",
+        4: "package://vdcl_fusion_perception/marker_dae/Trailer.dae",
+        5: "package://vdcl_fusion_perception/marker_dae/Truck.dae",
+        6: "package://vdcl_fusion_perception/marker_dae/Pedestrian.dae",
+        7: "package://vdcl_fusion_perception/marker_dae/Motorcycle.dae",
+        8: "package://vdcl_fusion_perception/marker_dae/Bicycle.dae",
+        9: "package://vdcl_fusion_perception/marker_dae/Barrier.dae",
+        10: "package://vdcl_fusion_perception/marker_dae/TrafficCone.dae",
+    }
+    m.mesh_resource = class_mesh_paths.get(track["type"], "")
+    return m
 
-            # if name in ("bicycle", "motorcycle"):
-            #     rospy.loginfo(f"[quat→yaw] {name} → NuScenes q=[w={w:.3f}, x={x:.3f}, y={y:.3f}, z={z:.3f}] → yaw={yaw:.3f}")
+def create_text_marker(track, header, marker_id):
+    t_m = Marker()
+    t_m.header = header
+    t_m.ns = "track_ids"
+    t_m.id = marker_id
+    t_m.type = Marker.TEXT_VIEW_FACING
+    t_m.action = Marker.ADD
+    t_m.pose.position.x = track["x"]
+    t_m.pose.position.y = track["y"]
+    t_m.pose.position.z = track["size"][2] + 1.0
+    t_m.scale.z = 0.8
+    t_m.color.a = 1.0
+    t_m.color.r = 1.0
+    t_m.color.g = 1.0
+    t_m.color.b = 1.0
+    t_m.text = str(track["id"])
+    return t_m
+
+# def quaternion_to_yaw(obj):
+#     """
+#     GT object에서 rotation(quaternion) → yaw(rad) 로 변환
+#     (NuScenes [w, x, y, z] 순서를 [x, y, z, w]로 변환 후 yaw 추출)
+#     bicycle / motorcycle 클래스만 출력
+#     """
+#     rotation = obj.get("rotation", None)
+#     name = obj.get("tracking_name", "")
+    
+#     if rotation and isinstance(rotation, list) and len(rotation) == 4:
+#         try:
+#             w, x, y, z = rotation
+#             q = [x, y, z, w]
+#             _, _, yaw = euler_from_quaternion(q)
+
+#             # if name in ("bicycle", "motorcycle"):
+#             #     rospy.loginfo(f"[quat→yaw] {name} → NuScenes q=[w={w:.3f}, x={x:.3f}, y={y:.3f}, z={z:.3f}] → yaw={yaw:.3f}")
             
-            return yaw
-        except Exception as e:
-            rospy.logwarn(f"[quat→yaw] {name} 변환 실패: {e}")
-            return 0.0
-    else:
-        if name in ("bicycle", "motorcycle"):
-            rospy.logwarn(f"[quat→yaw] {name} rotation 필드 없음 또는 포맷 오류")
-        return 0.0
+#             return yaw
+#         except Exception as e:
+#             rospy.logwarn(f"[quat→yaw] {name} 변환 실패: {e}")
+#             return 0.0
+#     else:
+#         if name in ("bicycle", "motorcycle"):
+#             rospy.logwarn(f"[quat→yaw] {name} rotation 필드 없음 또는 포맷 오류")
+#         return 0.0
 
 
-def create_gt_markers(gt_tracks, header):
-    markers = MarkerArray()
-    for i, obj in enumerate(gt_tracks):
-        m = Marker()
-        m.header = header
-        m.ns = "gt_boxes"
-        m.id = 2000 + i
-        m.type = Marker.CUBE
-        m.action = Marker.ADD
-        pos = obj.get('translation', [0,0,0])
-        size = obj.get('size', [1,1,1])
-        yaw = quaternion_to_yaw(obj) 
+# def create_gt_markers(gt_tracks, header):
+#     markers = MarkerArray()
+#     for i, obj in enumerate(gt_tracks):
+#         m = Marker()
+#         m.header = header
+#         m.ns = "gt_boxes"
+#         m.id = 2000 + i
+#         m.type = Marker.CUBE
+#         m.action = Marker.ADD
+#         pos = obj.get('translation', [0,0,0])
+#         size = obj.get('size', [1,1,1])
+#         yaw = quaternion_to_yaw(obj) 
 
-        m.pose.position.x = pos[0]
-        m.pose.position.y = pos[1]
-        m.pose.position.z = 1.0  # 높이 중간
+#         m.pose.position.x = pos[0]
+#         m.pose.position.y = pos[1]
+#         m.pose.position.z = 1.0  # 높이 중간
 
-        from tf.transformations import quaternion_from_euler
-        q = quaternion_from_euler(0, 0, yaw)
-        m.pose.orientation.x = q[0]
-        m.pose.orientation.y = q[1]
-        m.pose.orientation.z = q[2]
-        m.pose.orientation.w = q[3]
+#         from tf.transformations import quaternion_from_euler
+#         q = quaternion_from_euler(0, 0, yaw)
+#         m.pose.orientation.x = q[0]
+#         m.pose.orientation.y = q[1]
+#         m.pose.orientation.z = q[2]
+#         m.pose.orientation.w = q[3]
 
-        m.scale.x = size[0]
-        m.scale.y = size[1]
-        m.scale.z = size[2]
+#         m.scale.x = size[0]
+#         m.scale.y = size[1]
+#         m.scale.z = size[2]
 
-        m.color.a = 0.4
-        m.color.r = 0.0
-        m.color.g = 0.5
-        m.color.b = 1.0
+#         m.color.a = 0.4
+#         m.color.r = 0.0
+#         m.color.g = 0.5
+#         m.color.b = 1.0
 
-        markers.markers.append(m)
-    return markers
+#         markers.markers.append(m)
+#     return markers
 
 
 def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
@@ -437,6 +481,10 @@ def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
         - w1 * extra_area / universe_area
         - w2 * box_center_distance / union_distance
     )
+    
+    rospy.loginfo(f"[GDIoU] class={class_id}, IoU={iou:.3f}, "
+                f"extra_area={extra_area:.3f}, center_dist={box_center_distance:.3f}, "
+                f"volume_ratio={volume_ratio:.2f}, angle_sim={angle_ratio:.2f}, final={ro_gdiou:.3f}")
 
     return ro_gdiou
 
@@ -685,21 +733,24 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
             iou_cost = 1.0 - iou_score
             dist_cost = dist
             cost_matrix[i, j] = iou_cost + 0.5 * dist_cost
+            rospy.loginfo(f"[COST] T#{i} (ID={track.id}) vs D#{j} "
+                      f"[cls={track.label}] → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}")
 
-    # lapjv requires square matrix or extend_cost=True
+    # === Hungarian Matching with Exception-Safe lapjv + Logging ===
     try:
+        # lapjv requires square matrix or extend_cost=True
         res = lapjv(cost_matrix, extend_cost=True, cost_limit=default_threshold)
+
+        if not isinstance(res, tuple) or len(res) != 3:
+            rospy.logwarn("[Hungarian] lapjv 결과 형식 오류")
+            return [], list(range(len(detections))), list(range(len(tracks))), [], []
+
+        total_cost, row_ind, col_ind = res
+        rospy.loginfo(f"[LAPJ] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
+
     except Exception as e:
         rospy.logerr(f"[Hungarian] lapjv failed: {e}")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
-
-    if not isinstance(res, tuple) or len(res) != 3:
-        rospy.logwarn("[Hungarian] lapjv 결과 형식 오류")
-        return [], list(range(len(detections))), list(range(len(tracks))), [], []
-
-    total_cost, row_ind, col_ind = res
-    # rospy.loginfo(f"[DEBUG] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
-    # rospy.loginfo(f"[DEBUG] cost_matrix shape: {cost_matrix.shape}")
 
     matches = []
     unmatched_tracks = set(range(len(tracks)))
@@ -715,7 +766,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
         ro_iou = ro_gdiou_2d(track.size[:2], detections[c]["size"][:2], track.x[3], detections[c]["yaw"])
         cost = cost_matrix[r, c]
 
-        # rospy.loginfo(f"[CostCheck] Class {label}, cost={cost:.3f}, threshold={threshold}, ro_gdiou={ro_iou:.3f}")
+        rospy.loginfo(f"[MATCH_CHECK] T#{r} vs D#{c} → ID={track.id}, cls={label}, "
+                  f"cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}")
 
         if cost < threshold and ro_iou > 0.1:
             matches.append((track_idx, c))
@@ -744,7 +796,7 @@ CLASS_NAME_MAP = {
 CLASS_CONFIG = {
     1: {  # car
         'confirm_threshold': 1,
-        'max_unmatch': 0,
+        'max_unmatch': 1,
         'max_predict_len': 17,
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
@@ -758,7 +810,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 3.0,
     },
     6: {  # pedestrian
         'confirm_threshold': 1,
@@ -776,7 +828,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
     8:  {  # bicycle
         'confirm_threshold': 1,
@@ -794,7 +846,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
     7: {  # motorcycle
         'confirm_threshold': 1,
@@ -812,7 +864,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
     3:  {  # bus
         'confirm_threshold': 1,
@@ -830,7 +882,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
     4: {  # trailer
         'confirm_threshold': 1,
@@ -848,7 +900,7 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
     2: {  # truck
         'confirm_threshold': 1,
@@ -866,8 +918,62 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.eye(2),
         'Q_yaw': np.eye(2),
-        'R_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
     },
+    9: {  # barrier
+        'confirm_threshold': 1,
+        'max_unmatch': 2,
+        'max_predict_len': 10,
+        'confirmed_det_score': 0.5,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 0.0,  # 정적 객체로 가정
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.1, 0.1, 0.1, 0.1]),
+        'R': np.diag([0.2, 0.2, 0.1, 0.1]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
+    },
+    10: {  # traffic cone
+        'confirm_threshold': 1,
+        'max_unmatch': 2,
+        'max_predict_len': 10,
+        'confirmed_det_score': 0.5,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 0.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.1, 0.1, 0.1, 0.1]),
+        'R': np.diag([0.2, 0.2, 0.1, 0.1]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
+    },
+    5: {  # construction_vehicle
+        'confirm_threshold': 1,
+        'max_unmatch': 2,
+        'max_predict_len': 15,
+        'confirmed_det_score': 0.5,
+        'confirmed_match_score': 0.3,
+        'is_filter_predict_box': -1,
+        'expected_velocity': 3.0,
+        'P': np.diag([1.0, 1.0, 10.0, 10.0]),
+        'Q': np.diag([0.5, 0.5, 1.0, 1.0]),
+        'R': np.diag([0.7, 0.7, 0.5, 0.5]),
+        'P_size': np.eye(3),
+        'Q_size': np.eye(3),
+        'R_size': np.eye(2),
+        'P_yaw': np.eye(2),
+        'Q_yaw': np.eye(2),
+        'R_yaw_scalar': 0.5,
+    }
 }
 
 VALID_CLASSES = set(CLASS_CONFIG.keys())  # ex: {0, 1, 2, ..., 6}
@@ -899,7 +1005,7 @@ class KalmanTrackedObject:
             self.size_R = class_cfg["R_size"]
             self.yaw_P = class_cfg["P_yaw"]
             self.yaw_Q = class_cfg["Q_yaw"]
-            self.yaw_R = class_cfg["R_yaw"]
+            # self.yaw_R = class_cfg["R_yaw"]
             self.expected_velocity = class_cfg["expected_velocity"]
             self.confirm_threshold = class_cfg["confirm_threshold"]
             self.max_missed = class_cfg["max_unmatch"]
@@ -926,47 +1032,47 @@ class KalmanTrackedObject:
         self.bboxes = []
 
     def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
+        # === [1] Ego-motion Compensation ===
+        if ego_vel > 0.01 or abs(ego_yaw_rate) > 0.01:
+            dx = ego_vel * dt * np.cos(ego_yaw)
+            dy = ego_vel * dt * np.sin(ego_yaw)
+            dyaw = ego_yaw_rate * dt
+
+            cos_yaw = np.cos(-dyaw)
+            sin_yaw = np.sin(-dyaw)
+
+            rel_x = self.pose_state[0]
+            rel_y = self.pose_state[1]
+
+            self.pose_state[0] = cos_yaw * rel_x - sin_yaw * rel_y - dx
+            self.pose_state[1] = sin_yaw * rel_x + cos_yaw * rel_y - dy
+            self.yaw_state[0] -= dyaw
+            self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
+
+        # === [2] Kalman Prediction (only if no detection) ===
         F = np.eye(4)
         F[0, 2] = dt
         F[1, 3] = dt
-        pred_pose_state = F @ self.pose_state
-        pred_pose_P = F @ self.pose_P @ F.T + self.pose_Q
+        self.pose_state = F @ self.pose_state
+        self.pose_P = F @ self.pose_P @ F.T + self.pose_Q
 
-        if self.use_smoothing:
-            # ✅ smoothing 적용
-            alpha = 0.8
-            self.pose_state[0:2] = pred_pose_state[0:2]
-            self.pose_state[2] = alpha * self.pose_state[2] + (1-alpha) * pred_pose_state[2]
-            self.pose_state[3] = alpha * self.pose_state[3] + (1-alpha) * pred_pose_state[3]
-        else:
-            # ✅ smoothing 없이 덮어쓰기
-            self.pose_state = pred_pose_state
-
-        self.pose_P = pred_pose_P
-
-        # Yaw prediction
         Fy = np.eye(2)
         Fy[0, 1] = dt
         self.yaw_state = Fy @ self.yaw_state
         self.yaw_P = Fy @ self.yaw_P @ Fy.T + self.yaw_Q
+        self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
+
+        self.size_P = self.size_P + self.size_Q
 
         self.age += dt
         self.missed_count += 1
 
-        # Normalize yaw
-        self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
-
-        # Size prediction: static
-        self.size_P = self.size_P + self.size_Q
-
-        # 새로운 confidence 값 계산 (여기서는 예시로 0.7로 설정, 실제 값은 업데이트 로직에 맞게 계산)
-        detection_score = self.tracking_score()  # 예시로 트래킹 점수를 기반으로 설정
-        confidence = max(0.0, min(1.0, detection_score))  # 0과 1 사이로 제한
+        confidence = max(0.0, min(1.0, self.tracking_score()))
 
         pred_dict = {
             "frame_id": -1,
             "category": self.label,
-            "detection_score": confidence,  # 트래킹 신뢰도를 반영
+            "detection_score": confidence,
             "lwh": self.size.tolist(),
             "global_xyz": self.pose_state[:2].tolist() + [0.0],
             "global_orientation": [0, 0, 0, 1],
@@ -976,65 +1082,39 @@ class KalmanTrackedObject:
             "bbox_image": {"x1y1x2y2": [0, 0, 0, 0]}
         }
 
-        bbox_fields = {
-            "category": pred_dict["category"],
-            "detection_score": pred_dict["detection_score"],
-            "lwh": pred_dict["lwh"],
-            "global_xyz": pred_dict["global_xyz"],
-            "global_orientation": pred_dict["global_orientation"],
-            "global_yaw": pred_dict["global_yaw"],
-            "global_velocity": pred_dict["global_velocity"],
-            "global_acceleration": pred_dict["global_acceleration"],
-            "bbox_image": pred_dict["bbox_image"]
-        }
-        pred_bbox = BBox(frame_id=pred_dict["frame_id"], bbox=bbox_fields)
+        pred_bbox = BBox(frame_id=pred_dict["frame_id"], bbox=pred_dict)
         pred_bbox.is_fake = True
         self.bboxes.append(pred_bbox)
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
-        # ✅ 여기에 상태 전이 로직을 추가!
+
         if self.status_flag == TrackState.CONFIRMED and self.missed_count > self.max_missed:
             self.status_flag = TrackState.OBSCURED
 
         if self.status_flag == TrackState.OBSCURED and self.missed_count > (
             self.max_missed + CLASS_CONFIG[self.label]["max_predict_len"]
         ):
-            self.status_flag = TrackState.DEAD    
+            self.status_flag = TrackState.DEAD
 
 
     def update(self, detection, dt, matched_score):
+        # ✅ 덮어쓰기 방식으로 위치/속도 반영
         pos = detection['position']
         vel = detection.get('velocity', [0.0, 0.0])
-        z_pose = np.array([pos[0], pos[1], vel[0], vel[1]])
-        H_pose = np.eye(4)
-        y_pose = z_pose - H_pose @ self.pose_state
-        S_pose = H_pose @ self.pose_P @ H_pose.T + self.pose_R
-        K_pose = self.pose_P @ H_pose.T @ np.linalg.inv(S_pose)
-        self.pose_state += K_pose @ y_pose
-        self.pose_P = (np.eye(4) - K_pose @ H_pose) @ self.pose_P
+        self.pose_state[:2] = pos
+        self.pose_state[2:] = vel
+        self.pose_P = np.eye(4) * 1e-3  # 매우 작은 불확실성으로 초기화
 
-        # Velocity magnitude 업데이트
-        vx, vy = self.pose_state[2], self.pose_state[3]
-        speed = np.hypot(vx, vy)
-        
-        z_yaw = np.array([detection['yaw'], 0.0])
-        H_yaw = np.eye(2)
-        y_yaw = z_yaw - H_yaw @ self.yaw_state
-        S_yaw = H_yaw @ self.yaw_P @ H_yaw.T + self.yaw_R
-        K_yaw = self.yaw_P @ H_yaw.T @ np.linalg.inv(S_yaw)
-        self.yaw_state += K_yaw @ y_yaw
-        self.yaw_P = (np.eye(2) - K_yaw @ H_yaw) @ self.yaw_P
-        self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
+        # ✅ Yaw도 덮어쓰기
+        self.yaw_state[0] = detection['yaw']
+        self.yaw_state[1] = 0.0
+        self.yaw_P = np.eye(2) * 1e-2
 
-        z_size = np.array(detection['size'][:2])
-        H_size = np.eye(2, 3)
-        y_size = z_size - H_size @ self.size_state
-        S_size = H_size @ self.size_P @ H_size.T + self.size_R
-        K_size = self.size_P @ H_size.T @ np.linalg.inv(S_size)
-        self.size_state += K_size @ y_size
-        self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P
-        self.size_state = np.clip(self.size_state, a_min=0.1, a_max=20.0)
+        # ✅ Size도 덮어쓰기
+        self.size_state[:2] = detection['size'][:2]
+        self.size_P = np.eye(3) * 1e-2
 
+        # ✅ 기타 상태 업데이트
         self.soft_deleted = False
         self.missed_count = 0
         self.hits += 1
@@ -1047,12 +1127,12 @@ class KalmanTrackedObject:
         ):
             self.status_flag = TrackState.CONFIRMED
 
+        self.confidence = detection.get("confidence", 0.5)
         self.reproj_bbox = detection.get('reproj_bbox')
-        self.confidence = detection.get("confidence", 0.5)  # 기본값은 0.5로 설정
 
-        bbox_fields = {
+        new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
             "category": self.label,
-            "detection_score": self.confidence,  # confidence 값을 detection_score로 설정
+            "detection_score": self.confidence,
             "lwh": detection["size"],
             "global_xyz": detection["position"] + [0.0],
             "global_orientation": [0, 0, 0, 1],
@@ -1062,9 +1142,7 @@ class KalmanTrackedObject:
             "bbox_image": {
                 "x1y1x2y2": detection.get("reproj_bbox", [0.0, 0.0, 0.0, 0.0])
             }
-        }
-
-        new_bbox = BBox(frame_id=detection.get("id", 0), bbox=bbox_fields)
+        })
         self.bboxes.append(new_bbox)
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
@@ -1265,7 +1343,7 @@ class KalmanMultiObjectTracker:
 
         self.tracks = [
             t for t in self.tracks
-            if not (t.soft_deleted and t.missed_count > t.max_missed + 10)
+            if not (t.soft_deleted and t.missed_count > t.max_missed + 3)
         ]
 
         # 상태가 DEAD인 트랙 제거
@@ -1335,46 +1413,61 @@ class KalmanMultiObjectTracker:
  
 
 class MCTrackTrackerNode:
+    LABEL_STR_TO_ID = {
+        "car": 1,
+        "truck": 2,
+        "bus": 3,
+        "trailer": 4,
+        "construction vehicle": 5,
+        "pedestrian": 6,
+        "motorcycle": 7,
+        "bicycle": 8,
+        "barrier": 9,
+        "traffic cone": 10,
+    }
     def __init__(self):
         # 1) 반드시 init_node 부터 호출
         rospy.init_node("mctrack_tracker_node", anonymous=True)
+        # rospy.loginfo("[Tracker] 초기화 시작")
 
-        # 2) logger_ready 파라미터가 올라올 때까지 대기 (최대 15초)
-        rospy.loginfo("[Tracker] /logger_ready 기다리는 중…")
-        start = rospy.Time.now()
-        while not rospy.has_param("/logger_ready") and (rospy.Time.now() - start) < rospy.Duration(15.0):
-            if rospy.is_shutdown():
-                return
-            rospy.sleep(0.1)
-        if rospy.has_param("/logger_ready"):
-            rospy.loginfo("[Tracker] /logger_ready 감지, 시작합니다")
-        else:
-            rospy.logwarn("[Tracker] /logger_ready 대기 타임아웃, 계속 진행")
+        # # 2) logger_ready 파라미터가 올라올 때까지 대기 (최대 15초)
+        # rospy.loginfo("[Tracker] /logger_ready 기다리는 중…")
+        # start = rospy.Time.now()
+        # while not rospy.has_param("/logger_ready") and (rospy.Time.now() - start) < rospy.Duration(15.0):
+        #     if rospy.is_shutdown():
+        #         return
+        #     rospy.sleep(0.1)
+        # if rospy.has_param("/logger_ready"):
+        #     rospy.loginfo("[Tracker] /logger_ready 감지, 시작합니다")
+        # else:
+        #     rospy.logwarn("[Tracker] /logger_ready 대기 타임아웃, 계속 진행")
 
-        # 3) GT JSON 로드
-        with open(GT_JSON_PATH, 'r') as f:
-            raw = json.load(f)
-        raw_results = raw.get("results", {})
-        if isinstance(raw_results, dict):
-            self.gt_data = raw_results
-        else:
-            self.gt_data = {}
-            for ann in raw_results:
-                token = ann.get("sample_token") or ann.get("token")
-                if token:
-                    self.gt_data.setdefault(token, []).append(ann)
+        # # 3) GT JSON 로드
+        # with open(GT_JSON_PATH, 'r') as f:
+        #     raw = json.load(f)
+        # raw_results = raw.get("results", {})
+        # if isinstance(raw_results, dict):
+        #     self.gt_data = raw_results
+        # else:
+        #     self.gt_data = {}
+        #     for ann in raw_results:
+        #         token = ann.get("sample_token") or ann.get("token")
+        #         if token:
+        #             self.gt_data.setdefault(token, []).append(ann)
 
-        self.total_frames = len(self.gt_data)
+        # self.total_frames = len(self.gt_data)
         self.frame_idx    = 0
         self.start_time   = rospy.Time.now()
-
-        # === Static TF (map → base_link) 퍼블리시 세팅 ===
-        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
-        self.publish_static_tf()
+        self.marker_array = MarkerArray()
+        self.prev_track_ids = set()  # 트랙 ID 관리
+        self.marker_timer = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)
+        # # === Static TF (map → base_link) 퍼블리시 세팅 ===
+        # self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
+        # self.publish_static_tf()
 
         # 4) Kalman 트래커 초기화
-        use_rv_matching = rospy.get_param("~is_rv_matching", False)
-        use_hybrid = rospy.get_param("~use_hybrid_cost", False)
+        use_rv_matching = False   
+        use_hybrid = True   
 
         self.tracker = KalmanMultiObjectTracker(
             use_hungarian=True,
@@ -1387,27 +1480,29 @@ class MCTrackTrackerNode:
                                             PfGMFATrackArray,
                                             queue_size=100)
         self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)                                    
-        rospy.loginfo("[Tracker] /tracking/objects 구독자 기다리는 중…")
-        while self.tracking_pub.get_num_connections() == 0 and not rospy.is_shutdown():
-            rospy.sleep(0.1)
-        rospy.loginfo("[Tracker] 구독자 연결 완료, 리플레이어 구독 시작")
+        # rospy.loginfo("[Tracker] /tracking/objects 구독자 기다리는 중…")
+        # while self.tracking_pub.get_num_connections() == 0 and not rospy.is_shutdown():
+        #     rospy.sleep(0.1)
+        # rospy.loginfo("[Tracker] 구독자 연결 완료, 리플레이어 구독 시작")
 
         # 6) 리플레이어 콜백 구독
-        self.detection_sub = rospy.Subscriber("/lidar_detection",
-                                              LidarPerceptionOutput,
+        self.detection_sub = rospy.Subscriber("/detection_objects",
+                                              DetectionObjects,
                                               self.detection_callback,
-                                              queue_size= len(self.gt_data),
+                                              queue_size= 500,
                                               tcp_nodelay=True)
-        self.vel_sub     = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=1)
-        self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=1)
-        self.yaw_sub     = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=1)
+        # self.vel_sub     = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=1)
+        # self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=1)
+        # self.yaw_sub     = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=1)
+        self.chassis_sub = rospy.Subscriber("/chassis", Chassis, self.chassis_callback, queue_size=100)
 
         # 7) ego state 초기화 & 이전 타임스탬프 변수
         self.ego_vel         = 0.0
         self.ego_yaw_rate    = 0.0
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
-        self.last_token = None
+        # self.last_token = None
+        self.marker_timer = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
@@ -1419,6 +1514,40 @@ class MCTrackTrackerNode:
 
     def yaw_callback(self, msg):
         self.ego_yaw = msg.data
+
+    def chassis_callback(self, msg):
+        try:
+            avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr + msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
+            self.ego_vel = avg_speed_kph / 3.6
+            self.ego_yaw_rate = msg.cr_yrs_yr  # 단위가 rad/s라고 가정
+
+            # === Yaw 계산: 적분 ===
+            current_time = msg.header.stamp.to_sec()
+            if hasattr(self, 'last_chassis_time'):
+                dt = current_time - self.last_chassis_time
+                self.ego_yaw += self.ego_yaw_rate * dt
+                # normalize [-pi, pi]
+                self.ego_yaw = (self.ego_yaw + np.pi) % (2 * np.pi) - np.pi
+            else:
+                self.ego_yaw = 0.0  # 초기 yaw 설정
+            self.last_chassis_time = current_time
+
+        except Exception as e:
+            rospy.logwarn(f"[ChassisCallback] Error parsing chassis msg: {e}")
+    
+    def visualization_timer_callback(self, event):
+        # 10Hz 주기로 마커 퍼블리시만 담당
+        if hasattr(self, "marker_array"):
+            self.vis_pub.publish(self.marker_array)
+
+    def delete_all_markers(self):
+        for i, marker in reversed(list(enumerate(self.marker_array.markers))):
+            if marker.action == Marker.DELETE:
+                del self.marker_array.markers[i]
+            else:
+                marker.action = Marker.DELETE
+        self.vis_pub.publish(self.marker_array)
+        self.marker_array = MarkerArray()  # 비우기
 
     def publish_static_tf(self):
         static_tf = geometry_msgs.msg.TransformStamped()
@@ -1435,12 +1564,12 @@ class MCTrackTrackerNode:
         static_tf.transform.rotation.w = q[3]
         self.static_broadcaster.sendTransform(static_tf)
 
-        rospy.loginfo("🛰️ [Tracker] Static TF (map → base_link) published.")    
+        # rospy.loginfo("🛰️ [Tracker] Static TF (map → base_link) published.")    
 
     def detection_callback(self, msg):
-        token = msg.header.frame_id
         try:
-            rospy.logdebug(f"[DEBUG] → detection_callback 시작 token={token}, 객체수={len(msg.objects)}")
+            timestamp_sec = msg.header.stamp.to_sec()
+            rospy.logdebug(f"[DEBUG] detection_callback 시작 (timestamp={timestamp_sec:.6f}, 객체 수={len(msg.objects)})")
 
             # 1) dt 계산
             if self.last_time_stamp is None:
@@ -1450,48 +1579,60 @@ class MCTrackTrackerNode:
             self.last_time_stamp = msg.header.stamp
 
             self.frame_idx += 1
-            rospy.loginfo(f"[Tracker] Frame {self.frame_idx}/{self.total_frames}: {token} (dt={dt:.3f}s)")
+            rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
 
-            if self.last_token == token:
-                rospy.logwarn(f"[WARN] 토큰이 반복 수신됨: {token}")
-            self.last_token = token
+            # 2) 동일 timestamp 반복 수신 방지
+            if hasattr(self, "last_timestamp_sec") and abs(timestamp_sec - self.last_timestamp_sec) < 1e-6:
+                rospy.logwarn(f"[WARN] 동일한 timestamp가 반복 수신됨: {timestamp_sec:.6f}")
+            self.last_timestamp_sec = timestamp_sec
 
-            # 2) detection 변환 (VALID_CLASSES 필터링 포함)
+            # 3) Detection 변환 (VALID_CLASSES 필터링 포함)
             VALID_CLASSES = set(CLASS_CONFIG.keys())
+            # class_min_confidence = {k: 0.0 for k in VALID_CLASSES}
             class_min_confidence = {
-                1: 0.15, 2: 0.0, 3: 0.16, 4: 0.17, 6: 0.16, 7: 0.15, 8: 0.20,                 
-            } 
+                1: 0.03,   # car
+                2: 0.03,   # truck
+                3: 0.03,   # bus
+                4: 0.03,   # trailer
+                5: 0.02,   # construction vehicle
+                6: 0.01,   # pedestrian 
+                7: 0.02,   # motorcycle
+                8: 0.02,   # bicycle
+                9: 0.02,   # barrier
+                10: 0.01   # traffic cone 
+            }
             detections = []
             for i, obj in enumerate(msg.objects):
+                label_str = obj.label.strip().lower()
+                label = self.LABEL_STR_TO_ID.get(label_str, -1)
 
-                if obj.label not in VALID_CLASSES:
+                if label not in VALID_CLASSES:
+                    rospy.logwarn(f"[SKIP] Unknown or ignored class '{obj.label}' → mapped id: {label}")
                     continue
-                # rospy.loginfo(f"Class {obj.label}, score={obj.score}, bbox={obj.bbox_image}")  # ← 이 위치가 최적    
-                # 👉 여기에 추가
-                # if obj.label in [2, 3]:
-                #     rospy.loginfo(f"[DETECT] Class {CLASS_NAME_MAP.get(obj.label, '?')}, score={obj.score:.3f}")
 
-                if obj.score < class_min_confidence.get(obj.label, 0.3):
+                if obj.score < class_min_confidence.get(label, 0.0):
+                    rospy.loginfo(f"[SKIP] Low confidence {obj.score:.3f} for class '{obj.label}'")
                     continue
+
                 det = {
                     "id":           i,
-                    "position":    [obj.pos_x, obj.pos_y],
+                    "position":     [obj.x, obj.y],
                     "yaw":          obj.yaw,
-                    "size":         obj.size,
-                    "type":         obj.label,
-                    "reproj_bbox":  obj.bbox_image,
-                    "velocity":     [obj.vel_x, obj.vel_y], 
-                    "confidence":   obj.score  # 이 부분을 추가
+                    "size":         [obj.l, obj.w, obj.h],
+                    "type":         label,
+                    "reproj_bbox":  obj.boundingbox if len(obj.boundingbox) == 4 else [0.0] * 4,
+                    "velocity":     [obj.vx, obj.vy],
+                    "confidence":   obj.score
                 }
-                if det["reproj_bbox"] == [0,0,0,0]:
-                    rospy.logwarn(f"[RV-Match][INVALID] Detection ID {i} has empty bbox_image")
                 detections.append(det)
-            rospy.logdebug(f"[DEBUG] → 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
 
-            # 3) GT 트랙 정보 (시각화용)
-            gt_tracks = self.gt_data.get(token, [])
+            rospy.logdebug(f"[DEBUG] 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
 
-            # 4) predict + update: dt>0 일 때만
+            # 4) Ego 상태 업데이트
+            self.ego_vel = msg.ego_vel_x
+            self.ego_yaw_rate = msg.ego_yaw_rate
+
+            # 5) 트래커 업데이트
             if dt > 0:
                 self.tracker.update(detections, dt,
                                     ego_vel=self.ego_vel,
@@ -1500,9 +1641,9 @@ class MCTrackTrackerNode:
             else:
                 rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
 
-            # 5) 결과 퍼블리시 (빈 결과라도 항상 publish!)
+            # 6) 트랙 퍼블리시
             tracks = self.tracker.get_tracks()
-            rospy.loginfo(f"[Tracker] GT Tracks: {len(gt_tracks)}, Detected Tracks: {len(tracks)}")
+            rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
 
             ta = PfGMFATrackArray(header=msg.header)
             for t in tracks:
@@ -1511,27 +1652,92 @@ class MCTrackTrackerNode:
                 m.pos_y          = t["y"]
                 m.yaw            = t["yaw"]
                 dims             = list(t["size"])[:3]
-                m.boundingbox    = dims + [0.0]*5
+                m.boundingbox    = dims + [0.0] * 5
                 m.confidence_ind = t["confidence"]
                 m.id             = int(t["id"])
                 m.obj_class      = t["type"]
                 ta.tracks.append(m)
             self.tracking_pub.publish(ta)
-            rospy.loginfo(f"[Tracker] Published {len(ta.tracks)} tracks")
 
-            # debug_track_vs_gt(tracks, gt_tracks, "bicycle")
-            # debug_track_vs_gt(tracks, gt_tracks, "motorcycle")
-            # compute_track_recall(tracks, gt_tracks, "bicycle")
-            # compute_track_recall(tracks, gt_tracks, "motorcycle")
-            # 6) RViz 시각화
-            vis_header = Header(frame_id="map", stamp=rospy.Time.now())
-            self.vis_pub.publish(create_tracking_markers(tracks, vis_header))
-            if gt_tracks:
-                self.vis_pub.publish(create_gt_markers(gt_tracks, vis_header))
+            # === [7] RViz 마커 시각화 ===
+            vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
 
+            # 1. 현재 ID 모음
+            current_ids = set(t["id"] for t in tracks)
+
+            # 2. 이전에 있었지만 지금은 없는 → 삭제 대상
+            deleted_ids = getattr(self, "prev_track_ids", set()) - current_ids
+
+            # 3. 새 마커 array로 초기화
+            self.marker_array = MarkerArray()
+
+            # 4. 삭제 마커 추가
+            for tid in deleted_ids:
+                delete_marker = Marker()
+                delete_marker.header = vis_header
+                delete_marker.ns = "track_meshes"
+                delete_marker.id = tid
+                delete_marker.action = Marker.DELETE
+                self.marker_array.markers.append(delete_marker)
+
+                delete_text = Marker()
+                delete_text.header = vis_header
+                delete_text.ns = "track_ids"
+                delete_text.id = 1000 + tid
+                delete_text.action = Marker.DELETE
+                self.marker_array.markers.append(delete_text)
+
+            # 5. 현재 트랙 마커 추가
+            for t in tracks:
+                marker = create_single_track_marker(t, vis_header, t["id"])
+                self.marker_array.markers.append(marker)
+
+                text_marker = create_text_marker(t, vis_header, 1000 + t["id"])
+                self.marker_array.markers.append(text_marker)
+
+                # ✅ [New] 속도 방향 화살표 추가
+                vx, vy = t.get("velocity", [0.0, 0.0]) if "velocity" in t else [0.0, 0.0]
+                speed = np.hypot(vx, vy)
+                arrow = Marker()
+                arrow.header = vis_header
+                arrow.ns = "track_arrows"
+                arrow.id = 2000 + t["id"]  # 고유 ID
+                arrow.type = Marker.ARROW
+                arrow.action = Marker.ADD
+                arrow.scale.x = 0.2  # shaft length
+                arrow.scale.y = 0.5  # shaft width
+                arrow.scale.z = 0.3  # head width
+                arrow.color.a = 1.0
+                arrow.color.r = 1.0
+                arrow.color.g = 1.0
+                arrow.color.b = 0.0
+                arrow.lifetime = rospy.Duration(0.2)
+
+                arrow.points.append(Point(
+                    x=t["x"],
+                    y=t["y"],
+                    z=t["size"][2] / 2.0
+                ))
+                arrow.points.append(Point(
+                    x=t["x"] + vx * 1.5,
+                    y=t["y"] + vy * 1.5,
+                    z=t["size"][2] / 2.0
+                ))
+
+                self.marker_array.markers.append(arrow)
+    
+            # 6. 자차 마커 추가
+            ego_marker = create_ego_marker(vis_header.stamp)
+            self.marker_array.markers.append(ego_marker)
+
+            # 7. 퍼블리시
+            self.vis_pub.publish(self.marker_array)
+
+            # 8. 트랙 ID 갱신
+            self.prev_track_ids = current_ids
         except Exception as e:
             rospy.logerr(f"[detection_callback] Unexpected error: {e}\n{traceback.format_exc()}")
-
+            
 if __name__ == '__main__':
     try:
         MCTrackTrackerNode()
