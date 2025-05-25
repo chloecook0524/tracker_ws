@@ -482,9 +482,9 @@ def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
         - w2 * box_center_distance / union_distance
     )
     
-    rospy.loginfo(f"[GDIoU] class={class_id}, IoU={iou:.3f}, "
-                f"extra_area={extra_area:.3f}, center_dist={box_center_distance:.3f}, "
-                f"volume_ratio={volume_ratio:.2f}, angle_sim={angle_ratio:.2f}, final={ro_gdiou:.3f}")
+    # rospy.loginfo(f"[GDIoU] class={class_id}, IoU={iou:.3f}, "
+    #             f"extra_area={extra_area:.3f}, center_dist={box_center_distance:.3f}, "
+    #             f"volume_ratio={volume_ratio:.2f}, angle_sim={angle_ratio:.2f}, final={ro_gdiou:.3f}")
 
     return ro_gdiou
 
@@ -733,8 +733,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
             iou_cost = 1.0 - iou_score
             dist_cost = dist
             cost_matrix[i, j] = iou_cost + 0.5 * dist_cost
-            rospy.loginfo(f"[COST] T#{i} (ID={track.id}) vs D#{j} "
-                      f"[cls={track.label}] → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}")
+            # rospy.loginfo(f"[COST] T#{i} (ID={track.id}) vs D#{j} "
+            #           f"[cls={track.label}] → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}")
 
     # === Hungarian Matching with Exception-Safe lapjv + Logging ===
     try:
@@ -746,7 +746,7 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
             return [], list(range(len(detections))), list(range(len(tracks))), [], []
 
         total_cost, row_ind, col_ind = res
-        rospy.loginfo(f"[LAPJ] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
+        # rospy.loginfo(f"[LAPJ] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
 
     except Exception as e:
         rospy.logerr(f"[Hungarian] lapjv failed: {e}")
@@ -766,8 +766,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
         ro_iou = ro_gdiou_2d(track.size[:2], detections[c]["size"][:2], track.x[3], detections[c]["yaw"])
         cost = cost_matrix[r, c]
 
-        rospy.loginfo(f"[MATCH_CHECK] T#{r} vs D#{c} → ID={track.id}, cls={label}, "
-                  f"cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}")
+        # rospy.loginfo(f"[MATCH_CHECK] T#{r} vs D#{c} → ID={track.id}, cls={label}, "
+        #           f"cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}")
 
         if cost < threshold and ro_iou > 0.1:
             matches.append((track_idx, c))
@@ -1460,7 +1460,7 @@ class MCTrackTrackerNode:
         self.start_time   = rospy.Time.now()
         self.marker_array = MarkerArray()
         self.prev_track_ids = set()  # 트랙 ID 관리
-        self.marker_timer = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)
+        
         # # === Static TF (map → base_link) 퍼블리시 세팅 ===
         # self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
         # self.publish_static_tf()
@@ -1607,11 +1607,11 @@ class MCTrackTrackerNode:
                 label = self.LABEL_STR_TO_ID.get(label_str, -1)
 
                 if label not in VALID_CLASSES:
-                    rospy.logwarn(f"[SKIP] Unknown or ignored class '{obj.label}' → mapped id: {label}")
+                    # rospy.logwarn(f"[SKIP] Unknown or ignored class '{obj.label}' → mapped id: {label}")
                     continue
 
                 if obj.score < class_min_confidence.get(label, 0.0):
-                    rospy.loginfo(f"[SKIP] Low confidence {obj.score:.3f} for class '{obj.label}'")
+                    # rospy.loginfo(f"[SKIP] Low confidence {obj.score:.3f} for class '{obj.label}'")
                     continue
 
                 det = {
