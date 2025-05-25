@@ -23,6 +23,7 @@ from chassis_msgs.msg import Chassis
 from pyquaternion import Quaternion
 from geometry_msgs.msg import Point
 
+
 # # === Global Path to Baseversion Detection File ===
 # BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
 # GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
@@ -329,7 +330,7 @@ def create_single_track_marker(track, header, marker_id):
     m.mesh_use_embedded_materials = True
     m.pose.position.x = track["x"]
     m.pose.position.y = track["y"]
-    m.pose.position.z = track["size"][2] / 2.0
+    m.pose.position.z = track["position"][2] if "position" in track and len(track["position"]) > 2 else 0.0
     q = tf.transformations.quaternion_from_euler(0, 0, track["yaw"])
     m.pose.orientation.x = q[0]
     m.pose.orientation.y = q[1]
@@ -367,7 +368,7 @@ def create_text_marker(track, header, marker_id):
     t_m.action = Marker.ADD
     t_m.pose.position.x = track["x"]
     t_m.pose.position.y = track["y"]
-    t_m.pose.position.z = track["size"][2] + 1.0
+    t_m.pose.position.z = track["position"][2] + track["size"][2] + 0.5 if "position" in track and len(track["position"]) > 2 else track["size"][2] + 1.0
     t_m.scale.z = 0.8
     t_m.color.a = 1.0
     t_m.color.r = 1.0
@@ -719,7 +720,7 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
                     "category": det["type"],
                     "detection_score": det.get("confidence", 0.5),
                     "lwh": det["size"],
-                    "global_xyz": det["position"] + [0.0],
+                    "global_xyz": det["position"][:3],
                     "global_orientation": [0, 0, 0, 1],
                     "global_yaw": det["yaw"],
                     "global_velocity": det.get("velocity", [0.0, 0.0]),
@@ -991,7 +992,7 @@ class KalmanTrackedObject:
         self.hits = 1
         # self.state = TrackState.CONFIRMED if self.hits >= self.confirm_threshold else TrackState.TENTATIVE
         # self.status_flag = TrackState.INITIALIZATION
-        px, py = detection['position']
+        px, py = detection['position'][:2]
         vx, vy = detection.get("velocity", [0.0, 0.0])
         self.pose_state = np.array([px, py, vx, vy])
 
@@ -1074,7 +1075,7 @@ class KalmanTrackedObject:
             "category": self.label,
             "detection_score": confidence,
             "lwh": self.size.tolist(),
-            "global_xyz": self.pose_state[:2].tolist() + [0.0],
+            "global_xyz": self.pose_state[:2].tolist() + [self.bboxes[-1].global_xyz[2] if self.bboxes else 0.0],
             "global_orientation": [0, 0, 0, 1],
             "global_yaw": self.yaw_state[0],
             "global_velocity": self.pose_state[2:].tolist(),
@@ -1101,7 +1102,7 @@ class KalmanTrackedObject:
         # ✅ 덮어쓰기 방식으로 위치/속도 반영
         pos = detection['position']
         vel = detection.get('velocity', [0.0, 0.0])
-        self.pose_state[:2] = pos
+        self.pose_state[:2] = pos[:2] 
         self.pose_state[2:] = vel
         self.pose_P = np.eye(4) * 1e-3  # 매우 작은 불확실성으로 초기화
 
@@ -1134,7 +1135,7 @@ class KalmanTrackedObject:
             "category": self.label,
             "detection_score": self.confidence,
             "lwh": detection["size"],
-            "global_xyz": detection["position"] + [0.0],
+            "global_xyz": detection["position"][:3],
             "global_orientation": [0, 0, 0, 1],
             "global_yaw": detection["yaw"],
             "global_velocity": detection.get("velocity", [0.0, 0.0]),
@@ -1406,7 +1407,9 @@ class KalmanMultiObjectTracker:
                 "yaw":        yaw,
                 "size":       size,
                 "confidence": score,
-                "type":       t.label
+                "type":       t.label,
+                "velocity":   t.pose_state[2:4].tolist(),  # ← vx, vy 포함
+                "position":   [t.pose_state[0], t.pose_state[1], t.bboxes[-1].global_xyz[2] if t.bboxes else 0.0]  # ← z도 포함
             })
 
         return results
@@ -1428,6 +1431,7 @@ class MCTrackTrackerNode:
     def __init__(self):
         # 1) 반드시 init_node 부터 호출
         rospy.init_node("mctrack_tracker_node", anonymous=True)
+        self.tracking_timer = rospy.Timer(rospy.Duration(0.1), self.tracking_publish_callback)  # 10Hz
         # rospy.loginfo("[Tracker] 초기화 시작")
 
         # # 2) logger_ready 파라미터가 올라올 때까지 대기 (최대 15초)
@@ -1540,6 +1544,30 @@ class MCTrackTrackerNode:
         if hasattr(self, "marker_array"):
             self.vis_pub.publish(self.marker_array)
 
+    def tracking_publish_callback(self, event):
+        if not hasattr(self, 'last_time_stamp'):
+            return  # 아직 첫 detection이 안 들어왔으면 skip
+
+        tracks = self.tracker.get_tracks()
+
+        ta = PfGMFATrackArray()
+        ta.header.stamp = rospy.Time.now()  # 또는 self.last_time_stamp
+        ta.header.frame_id = "vehicle"
+
+        for t in tracks:
+            m = PfGMFATrack()
+            m.pos_x = t["x"]
+            m.pos_y = t["y"]
+            m.yaw   = t["yaw"]
+            dims    = list(t["size"])[:3]
+            m.boundingbox = dims + [0.0] * 5
+            m.confidence_ind = t["confidence"]
+            m.id = int(t["id"])
+            m.obj_class = t["type"]
+            ta.tracks.append(m)
+
+        self.tracking_pub.publish(ta)
+
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
             if marker.action == Marker.DELETE:
@@ -1616,7 +1644,7 @@ class MCTrackTrackerNode:
 
                 det = {
                     "id":           i,
-                    "position":     [obj.x, obj.y],
+                    "position":     [obj.x, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
                     "yaw":          obj.yaw,
                     "size":         [obj.l, obj.w, obj.h],
                     "type":         label,
@@ -1657,7 +1685,7 @@ class MCTrackTrackerNode:
                 m.id             = int(t["id"])
                 m.obj_class      = t["type"]
                 ta.tracks.append(m)
-            self.tracking_pub.publish(ta)
+            # self.tracking_pub.publish(ta)
 
             # === [7] RViz 마커 시각화 ===
             vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
@@ -1687,6 +1715,15 @@ class MCTrackTrackerNode:
                 delete_text.action = Marker.DELETE
                 self.marker_array.markers.append(delete_text)
 
+                delete_arrow = Marker()
+                delete_arrow.header = vis_header
+                delete_arrow.ns = "track_arrows"
+                delete_arrow.id = 2000 + tid
+                delete_arrow.action = Marker.DELETE
+                self.marker_array.markers.append(delete_arrow)
+
+
+
             # 5. 현재 트랙 마커 추가
             for t in tracks:
                 marker = create_single_track_marker(t, vis_header, t["id"])
@@ -1697,31 +1734,35 @@ class MCTrackTrackerNode:
 
                 # ✅ [New] 속도 방향 화살표 추가
                 vx, vy = t.get("velocity", [0.0, 0.0]) if "velocity" in t else [0.0, 0.0]
-                speed = np.hypot(vx, vy)
+                dx = vx
+                dy = vy
+
                 arrow = Marker()
                 arrow.header = vis_header
                 arrow.ns = "track_arrows"
-                arrow.id = 2000 + t["id"]  # 고유 ID
+                arrow.id = 2000 + t["id"]
                 arrow.type = Marker.ARROW
                 arrow.action = Marker.ADD
-                arrow.scale.x = 0.2  # shaft length
-                arrow.scale.y = 0.5  # shaft width
-                arrow.scale.z = 0.3  # head width
+                arrow.scale.x = 0.2
+                arrow.scale.y = 0.5
+                arrow.scale.z = 0.3
                 arrow.color.a = 1.0
                 arrow.color.r = 1.0
                 arrow.color.g = 1.0
-                arrow.color.b = 0.0
-                arrow.lifetime = rospy.Duration(0.2)
+                arrow.color.b = 1.0  # 흰색
+
+                z_base = t["position"][2] if "position" in t and len(t["position"]) > 2 else 0.0
+                z_center = z_base + t["size"][2] / 2.0
 
                 arrow.points.append(Point(
                     x=t["x"],
                     y=t["y"],
-                    z=t["size"][2] / 2.0
+                    z=z_center
                 ))
                 arrow.points.append(Point(
-                    x=t["x"] + vx * 1.5,
-                    y=t["y"] + vy * 1.5,
-                    z=t["size"][2] / 2.0
+                    x=t["x"] + dx,
+                    y=t["y"] + dy,
+                    z=z_center
                 ))
 
                 self.marker_array.markers.append(arrow)
