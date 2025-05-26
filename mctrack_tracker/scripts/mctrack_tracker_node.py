@@ -796,11 +796,9 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
 # === TrackState Enum ===
 class TrackState:
     INITIALIZATION = 0
-    TENTATIVE = 10      # ← 추가
     CONFIRMED = 1
     OBSCURED = 2
     DEAD = 4
-
 
 CLASS_NAME_MAP = {
     1: "car", 6: "pedestrian", 8: "bicycle", 7: "motorcycle", 3: "bus",
@@ -1133,15 +1131,15 @@ class KalmanTrackedObject:
         self.missed_count = 0
         self.hits += 1
         self.traj_length += 1
-        if self.hits >= self.confirm_threshold:
-            self.state = TrackState.CONFIRMED
+        # if self.hits >= self.confirm_threshold:
+        #     self.state = TrackState.CONFIRMED
+        self.confidence = detection.get("confidence", 0.5)
+
         if self.traj_length > self.confirm_threshold or (
-            detection.get("score", 0.0) > CLASS_CONFIG[self.label]["confirmed_det_score"] and
-            detection.get("score", 0.0) > CLASS_CONFIG[self.label]["confirmed_match_score"]
+            self.confidence > CLASS_CONFIG[self.label]["confirmed_det_score"] and
+            self.confidence > CLASS_CONFIG[self.label]["confirmed_match_score"]
         ):
             self.status_flag = TrackState.CONFIRMED
-
-        self.confidence = detection.get("confidence", 0.5)
         self.reproj_bbox = detection.get('reproj_bbox')
 
         new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
