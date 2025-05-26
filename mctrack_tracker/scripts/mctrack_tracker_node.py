@@ -330,20 +330,28 @@ def create_single_track_marker(track, header, marker_id):
     m.mesh_use_embedded_materials = True
     m.pose.position.x = track["x"]
     m.pose.position.y = track["y"]
-    m.pose.position.z = track["position"][2] if "position" in track and len(track["position"]) > 2 else 0.0
+    
+    # ✅ Z 위치 보정 (중심 기준)
+    z_base = track["position"][2] if "position" in track and len(track["position"]) > 2 else 0.0
+    z_center = z_base + track["size"][2] / 2.0
+    m.pose.position.z = z_center
+
     q = tf.transformations.quaternion_from_euler(0, 0, track["yaw"])
     m.pose.orientation.x = q[0]
     m.pose.orientation.y = q[1]
     m.pose.orientation.z = q[2]
     m.pose.orientation.w = q[3]
+
     m.scale.x = track["size"][0]
     m.scale.y = track["size"][1]
     m.scale.z = track["size"][2]
+
     m.color.a = min(track["confidence"] * 5, 1.0)
     m.lifetime = rospy.Duration(0.2)
-    m.color.r = 1.0
-    m.color.g = 1.0
+    m.color.r = 0.0
+    m.color.g = 0.3
     m.color.b = 1.0
+
     class_mesh_paths = {
         1: "package://vdcl_fusion_perception/marker_dae/Car.dae",
         2: "package://vdcl_fusion_perception/marker_dae/Truck.dae",
@@ -678,7 +686,7 @@ def image_plane_matching_sdiou(tracks, detections):
 
 
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
-def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
+def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, ego_vel=0.0, ego_yaw=0.0):
     if not tracks or not detections:
         rospy.logwarn("[Hungarian Matching] No tracks or detections available!")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
@@ -709,8 +717,13 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False):
             box1 = track.size[:2]
             box2 = det["size"][:2]
             center1 = track.x[:2]
-            center2 = det["position"]
-            dist = np.hypot(center1[0] - center2[0], center1[1] - center2[1])
+
+            # === 보정된 detection 좌표 계산
+            dx = ego_vel * dt * np.cos(ego_yaw)
+            dy = ego_vel * dt * np.sin(ego_yaw)
+            corrected_det_pos = np.array(det["position"][:2]) + np.array([dx, dy])
+
+            dist = np.linalg.norm(center1 - corrected_det_pos)
 
             if use_hybrid_cost and dist > 10.0:
                 continue
@@ -1293,7 +1306,8 @@ class KalmanMultiObjectTracker:
         # 1) Standard Hungarian matching
         if self.use_hungarian and self.tracks and detections:
             matches_h, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
-                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost)
+                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost,
+                                    dt=dt, ego_vel=ego_vel, ego_yaw=ego_yaw)
             for tr, det in zip(matched_trks, matched_dets):
                 tr.update(det, dt, matched_score=det.get("confidence", 0.5))
 
@@ -1663,9 +1677,9 @@ class MCTrackTrackerNode:
             # 5) 트래커 업데이트
             if dt > 0:
                 self.tracker.update(detections, dt,
-                                    ego_vel=self.ego_vel,
-                                    ego_yaw_rate=self.ego_yaw_rate,
-                                    ego_yaw=self.ego_yaw)
+                            ego_vel=self.ego_vel,
+                            ego_yaw_rate=self.ego_yaw_rate,
+                            ego_yaw=self.ego_yaw)
             else:
                 rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
 
