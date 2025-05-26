@@ -376,7 +376,7 @@ def create_text_marker(track, header, marker_id):
     t_m.action = Marker.ADD
     t_m.pose.position.x = track["x"]
     t_m.pose.position.y = track["y"]
-    t_m.pose.position.z = track["position"][2] + track["size"][2] + 0.5 if "position" in track and len(track["position"]) > 2 else track["size"][2] + 1.0
+    t_m.pose.position.z = track["position"][2] + track["size"][2] + 1.5 if "position" in track and len(track["position"]) > 2 else track["size"][2] + 1.0
     t_m.scale.z = 0.8
     t_m.color.a = 1.0
     t_m.color.r = 1.0
@@ -1369,7 +1369,7 @@ class KalmanMultiObjectTracker:
         results = []
 
         # ✅ 평가 대상 클래스만 기록 (NuScenes 기준)
-        VALID_LOG_LABELS = {1, 2, 3, 4, 5, 6, 7, 8
+        VALID_LOG_LABELS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10
                             }
 
         for t in self.tracks:
