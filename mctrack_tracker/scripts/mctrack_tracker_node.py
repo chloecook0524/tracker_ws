@@ -347,7 +347,7 @@ def create_single_track_marker(track, header, marker_id):
     m.scale.z = track["size"][2]
 
     m.color.a = min(track["confidence"] * 5, 1.0)
-    m.lifetime = rospy.Duration(0.2)
+    m.lifetime = rospy.Duration(0.0)
     m.color.r = 0.0
     m.color.g = 0.3
     m.color.b = 1.0
@@ -695,35 +695,30 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
     detections = [d for d in detections if d["type"] in VALID_CLASS_IDS]
 
     cost_thresholds = {
-        1: 1.10, 6: 2.06, 8: 2.00, 7: 2.06,
-        3: 1.60, 4: 1.26, 2: 1.16
+        1: 1.5,   # car
+        2: 1.8,   # truck
+        3: 2.0,   # bus
+        4: 1.8,   # trailer
+        5: 1.8,   # construction_vehicle
+        6: 1.0,   # pedestrian
+        7: 1.2,   # motorcycle
+        8: 1.2,   # bicycle
+        9: 0.8,   # barrier
+        10: 0.7,  # traffic cone
     }
     default_threshold = 2.2
 
-    valid_tracks = [
-        t for t in tracks
-        if t.label in CLASS_CONFIG and
-        t.traj_length <= CLASS_CONFIG[t.label]["max_predict_len"]
-    ]
-    if not valid_tracks:
-        return [], list(range(len(detections))), list(range(len(tracks))), [], []
+    cost_matrix = np.ones((len(tracks), len(detections))) * 1e6
 
-    cost_matrix = np.ones((len(valid_tracks), len(detections))) * 1e6  # 초기 large cost
-
-    for i, track in enumerate(valid_tracks):
+    for i, track in enumerate(tracks):
         for j, det in enumerate(detections):
             if det["type"] != track.label:
                 continue
-            box1 = track.size[:2]
-            box2 = det["size"][:2]
-            center1 = track.x[:2]
 
-            # === 보정된 detection 좌표 계산
             dx = ego_vel * dt * np.cos(ego_yaw)
             dy = ego_vel * dt * np.sin(ego_yaw)
             corrected_det_pos = np.array(det["position"][:2]) + np.array([dx, dy])
-
-            dist = np.linalg.norm(center1 - corrected_det_pos)
+            dist = np.linalg.norm(track.x[:2] - corrected_det_pos)
 
             if use_hybrid_cost and dist > 10.0:
                 continue
@@ -741,27 +736,21 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
                     "bbox_image": {"x1y1x2y2": det.get("reproj_bbox", [0, 0, 0, 0])}
                 }), det["type"], cal_flag="Predict")
                 if use_hybrid_cost else
-                ro_gdiou_2d(box1, box2, track.x[3], det["yaw"])
+                ro_gdiou_2d(track.size[:2], det["size"][:2], track.x[3], det["yaw"])
             )
 
-            iou_cost = 1.0 - iou_score
-            dist_cost = dist
-            cost_matrix[i, j] = iou_cost + 0.5 * dist_cost
-            # rospy.loginfo(f"[COST] T#{i} (ID={track.id}) vs D#{j} "
-            #           f"[cls={track.label}] → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}")
+            cost_matrix[i, j] = 0.001  # or real cost if needed
 
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(f"[COST] T#{i} (ID={track.id}) vs D#{j} → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}\n")
+    
     # === Hungarian Matching with Exception-Safe lapjv + Logging ===
     try:
-        # lapjv requires square matrix or extend_cost=True
         res = lapjv(cost_matrix, extend_cost=True, cost_limit=default_threshold)
-
         if not isinstance(res, tuple) or len(res) != 3:
             rospy.logwarn("[Hungarian] lapjv 결과 형식 오류")
             return [], list(range(len(detections))), list(range(len(tracks))), [], []
-
         total_cost, row_ind, col_ind = res
-        # rospy.loginfo(f"[LAPJ] total_cost={total_cost}, row_ind={row_ind}, col_ind={col_ind}")
-
     except Exception as e:
         rospy.logerr(f"[Hungarian] lapjv failed: {e}")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
@@ -770,26 +759,32 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
     unmatched_tracks = set(range(len(tracks)))
     unmatched_dets = set(range(len(detections)))
 
-    for r, c in enumerate(row_ind):
-        if c == -1 or r >= len(valid_tracks) or c >= len(detections):
+    for i, j in enumerate(row_ind):
+        if j == -1 or i >= len(tracks) or j >= len(detections):
             continue
-        track = valid_tracks[r]
-        track_idx = tracks.index(track)
-        label = track.label
+        cost = cost_matrix[i, j]
+        label = tracks[i].label
         threshold = cost_thresholds.get(label, default_threshold)
-        ro_iou = ro_gdiou_2d(track.size[:2], detections[c]["size"][:2], track.x[3], detections[c]["yaw"])
-        cost = cost_matrix[r, c]
+        ro_iou = ro_gdiou_2d(tracks[i].size[:2], detections[j]["size"][:2], tracks[i].x[3], detections[j]["yaw"])
 
-        # rospy.loginfo(f"[MATCH_CHECK] T#{r} vs D#{c} → ID={track.id}, cls={label}, "
-        #           f"cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}")
+        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            f.write(f"[MATCH_CHECK] T#{i} vs D#{j} → ID={tracks[i].id}, cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}\n")
 
-        if cost < threshold and ro_iou > 0.1:
-            matches.append((track_idx, c))
-            unmatched_tracks.discard(track_idx)
-            unmatched_dets.discard(c)
+        if cost < threshold:
+            matches.append((i, j))
+            unmatched_tracks.discard(i)
+            unmatched_dets.discard(j)
 
-    matched_tracks = [tracks[r] for r, _ in matches]
-    matched_detections = [detections[c] for _, c in matches]
+    for ti in unmatched_tracks:
+        if ti < len(tracks):
+            best_di = int(np.argmin(cost_matrix[ti]))
+            best_cost = float(cost_matrix[ti][best_di])
+            # rospy.loginfo(f"[UNMATCHED] T#{ti} vs best D#{best_di}: cost={best_cost:.2f}")
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(f"[UNMATCHED] T#{ti} vs best D#{best_di}: cost={best_cost:.2f}\n")
+
+    matched_tracks = [tracks[i] for i, _ in matches]
+    matched_detections = [detections[j] for _, j in matches]
 
     return matches, list(unmatched_dets), list(unmatched_tracks), matched_tracks, matched_detections
 
@@ -808,7 +803,7 @@ CLASS_NAME_MAP = {
 CLASS_CONFIG = {
     1: {  # car
         'confirm_threshold': 1,
-        'max_unmatch': 1,
+        'max_unmatch': 5,
         'max_predict_len': 17,
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
@@ -1077,7 +1072,7 @@ class KalmanTrackedObject:
         self.size_P = self.size_P + self.size_Q
 
         self.age += dt
-        self.missed_count += 1
+        # self.missed_count += 1
 
         confidence = max(0.0, min(1.0, self.tracking_score()))
 
@@ -1101,11 +1096,21 @@ class KalmanTrackedObject:
             self.bboxes.pop(0)
 
         if self.status_flag == TrackState.CONFIRMED and self.missed_count > self.max_missed:
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(f"[STATE_CHANGE] ID={self.id} CONFIRMED → OBSCURED | missed={self.missed_count}, max={self.max_missed}\n")
             self.status_flag = TrackState.OBSCURED
 
         if self.status_flag == TrackState.OBSCURED and self.missed_count > (
             self.max_missed + CLASS_CONFIG[self.label]["max_predict_len"]
         ):
+            # ✅ 삭제 보류 조건: traj_len > 10, confidence > 0.6
+            if self.traj_length > 10 and getattr(self, 'confidence', 0.5) > 0.6:
+                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    f.write(f"[삭제 보류] ID={self.id}, missed={self.missed_count}, traj_len={self.traj_length}, conf={self.confidence:.2f}\n")
+                return  # 아직 삭제 안 함
+
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(f"[STATE_CHANGE] ID={self.id} OBSCURED → DEAD | missed={self.missed_count}, max_predict_len={CLASS_CONFIG[self.label]['max_predict_len']}\n")
             self.status_flag = TrackState.DEAD
 
 
@@ -1158,6 +1163,13 @@ class KalmanTrackedObject:
         self.bboxes.append(new_bbox)
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
+
+        update_log = (
+            f"[UPDATE] ID={self.id}, hits={self.hits}, traj_len={self.traj_length}, "
+            f"status={self.status_flag}, soft_deleted={self.soft_deleted}, missed={self.missed_count}"
+        )
+        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            f.write(update_log + "\n")    
 
     def tracking_score(self):
         vel = np.hypot(self.pose_state[2], self.pose_state[3])
@@ -1231,7 +1243,7 @@ class KalmanMultiObjectTracker:
 
                 bbox1 = getattr(track, 'reproj_bbox', None)
                 bbox2 = det.get('reproj_bbox', None)
-                if bbox1 and bbox2 and bbox_iou_2d(bbox1, bbox2) < 0.1:
+                if bbox1 and bbox2 and bbox_iou_2d(bbox1, bbox2) < 0.05:
                     continue
 
                 if score > best_score and score > 0.6:
@@ -1261,8 +1273,9 @@ class KalmanMultiObjectTracker:
             if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
                 continue
 
-            best_score = -1.0
+            best_cost = float("inf")
             best_det = -1
+
             for di in unmatched_dets:
                 if di in used:
                     continue
@@ -1272,15 +1285,17 @@ class KalmanMultiObjectTracker:
 
                 dx = track.pose_state[0] - det["position"][0]
                 dy = track.pose_state[1] - det["position"][1]
-                if np.hypot(dx, dy) > _get_class_distance_threshold(track.label):
+                dist = np.hypot(dx, dy)
+                if dist > _get_class_distance_threshold(track.label):
                     continue
 
-                score = ro_gdiou_2d(track.size[:2],
-                                    det['size'][:2],
-                                    track.yaw_state[0],
-                                    det['yaw'])
-                if score > best_score and score > 0.3:
-                    best_score = score
+                score = ro_gdiou_2d(track.size[:2], det['size'][:2],
+                                    track.yaw_state[0], det['yaw'])
+
+                cost = dist + (1.0 - score)  # hybrid cost 기준
+
+                if cost < 1.5 and cost < best_cost:
+                    best_cost = cost
                     best_det = di
 
             if best_det >= 0:
@@ -1289,10 +1304,15 @@ class KalmanMultiObjectTracker:
                 self.tracks[ti].update(matched_det, dt, matched_score=confidence)
                 used.append(best_det)
 
+                # ✅ 디버깅 로그 출력
+                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    f.write(f"[FALLBACK] T#{ti} (ID={track.id}) ← D#{best_det}: cost={best_cost:.2f}\n")
         return used
 
 
     def update(self, detections, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
+        matched_tracks = []
+        matched_dets = []
         # 0) predict
         for t in self.tracks:
             t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
@@ -1343,24 +1363,56 @@ class KalmanMultiObjectTracker:
         # 5) New track 생성
         for di in unmatched_dets:
             det = detections[di]
+            new_track = KalmanTrackedObject(det)
+            self.tracks.append(new_track)
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(f"[CREATE] New track ID={new_track.id} class={det['type']} x={det['position'][0]:.2f}, y={det['position'][1]:.2f}\n")
 
-            # 👉 여기에 추가
-            # if det["type"] in [2, 3]:  # bicycle, motorcy
-            #     rospy.loginfo(f"[CREATE] New track for class {det['type']}, det_id={di}")
-            self.tracks.append(KalmanTrackedObject(detections[di]))
-
-        # 6) Soft-delete vs Hard-delete
+        # ✅ 6) missed_count 증가 먼저
+        matched_track_ids = set(t.id for t in matched_tracks)
         for t in self.tracks:
-            if t.missed_count > t.max_missed:
-                t.soft_deleted = True
+            if t.id not in matched_track_ids:
+                t.missed_count += 1
+                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    f.write(f"[MISSED_INC] ID={t.id}, missed_count={t.missed_count}\n")
 
+        # ✅ 7) Soft-delete vs Hard-delete 판단 (missed_count 증가 반영됨)
+        for t in self.tracks:
+            if t.status_flag == TrackState.CONFIRMED:
+                if t.missed_count > t.max_missed + 10:
+                    t.soft_deleted = True
+                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                        f.write(f"[SOFT_DELETE] ID={t.id}, status=CONFIRMED, missed={t.missed_count}, allowed={t.max_missed + 5}\n")
+            else:
+                if t.missed_count > t.max_missed:
+                    t.soft_deleted = True
+                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                        f.write(f"[SOFT_DELETE] ID={t.id}, status={t.status_flag}, missed={t.missed_count}, allowed={t.max_missed}\n")
+
+
+        # 8) 삭제 직전 로깅
+        for t in self.tracks:
+            if t.soft_deleted and t.missed_count > t.max_missed + 10:
+                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    f.write(f"[DELETE] ID={t.id} deleted | missed={t.missed_count}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
+
+        # 9) 실제 제거
         self.tracks = [
             t for t in self.tracks
             if not (t.soft_deleted and t.missed_count > t.max_missed + 3)
         ]
 
-        # 상태가 DEAD인 트랙 제거
-        self.tracks = [t for t in self.tracks if t.status_flag != TrackState.DEAD]
+        # 🔻 여기에 추가하세요 🔻
+        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            for t in self.tracks:
+                f.write(f"[STATE] ID={t.id}, cls={t.label}, hits={t.hits}, missed={t.missed_count}, traj_len={t.traj_length}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
+        # === 💬 CONFIRMED 상태의 차량 트랙 수 기록 ===
+        confirmed_car_tracks = [t for t in self.tracks if t.label == 1 and t.status_flag == TrackState.CONFIRMED]
+        track_stat_log = f"[STATS] Confirmed car tracks = {len(confirmed_car_tracks)}"
+        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            f.write(track_stat_log + "\n")
+
+        # 기존 출력 (필요시 유지)
         rospy.loginfo(f"[Tracker] Total Tracks: {len(self.tracks)}")
 
     def get_tracks(self):
@@ -1373,45 +1425,25 @@ class KalmanMultiObjectTracker:
         for t in self.tracks:
             if CLASS_CONFIG[t.label].get("is_filter_predict_box", -1) == 1 and t.hits == 0:
                 continue
-            # 🔒 Confirmed 상태만
             if t.status_flag != TrackState.CONFIRMED:
                 continue
-            # 🧹 soft-deleted 제거
             if getattr(t, 'soft_deleted', False):
                 continue
-            # 📈 최소 trajectory 길이
             if getattr(t, 'traj_length', 0) < 1:
                 continue
-            # 🚫 평가 제외 클래스 무시
             if t.label not in VALID_LOG_LABELS:
                 continue
-            # # 📉 신뢰도 낮은 트랙 제외
-            # score = t.tracking_score()
-            # # 👉 여기에 추가
-            # # if t.label in [2, 3]:
-            # #     score = t.tracking_score()
-            # #     rospy.loginfo(f"[TRACK-SCORE] ID={t.id}, class={CLASS_NAME_MAP.get(t.label, '?')}, "
-            # #           f"score={score:.3f}, traj_len={t.traj_length}, age={t.age:.2f}")
 
-        
-            # score_thresh = 0.3
-            # # if t.label in [2, 3]:
-            # #     rospy.loginfo(f"[TRACK-CHECK] id={t.id}, class={t.label}, score={score:.3f}, threshold={score_thresh}")
-            # if score < score_thresh:
-            #     continue
+            # ✅ 여기 추가: 특정 좌표에 있는 트랙만 로깅
+            FIXED_X, FIXED_Y = -12.9, 4.8  # 대략 찍은 위치 근처
+            if t.label == 1 and abs(t.x[0] - FIXED_X) < 0.5 and abs(t.x[1] - FIXED_Y) < 0.5:
+                with open("/tmp/track_id_at_location.txt", "a") as f:
+                    f.write(f"[FIXED_TRACK] ID={t.id}, x={t.x[0]:.2f}, y={t.x[1]:.2f}, traj_len={t.traj_length}\n")
 
-            # if t.label in [2, 3] and t.age < 1.0:
-            #     rospy.loginfo(f"[SKIP] Early age for class={t.label}, id={t.id}, age={t.age:.2f}")
-            #     continue
-            
-            score = t.confidence
-            # ✅ 최종 트랙 저장
+            # 기존 트랙 결과에 추가
             x, y, yaw = t.x[0], t.x[1], t.x[3]
             size = t.size
-            
-            # if t.label in [2, 3]:
-            #     rospy.loginfo(f"[DEBUG] Track label={t.label}, age={t.age:.2f}, traj_len={t.traj_length}, score={t.tracking_score():.3f}")
-
+            score = t.confidence
             results.append({
                 "id":         t.id,
                 "x":          x,
@@ -1420,12 +1452,12 @@ class KalmanMultiObjectTracker:
                 "size":       size,
                 "confidence": score,
                 "type":       t.label,
-                "velocity":   t.pose_state[2:4].tolist(),  # ← vx, vy 포함
-                "position":   [t.pose_state[0], t.pose_state[1], t.bboxes[-1].global_xyz[2] if t.bboxes else 0.0]  # ← z도 포함
+                "velocity":   t.pose_state[2:4].tolist(),
+                "position":   [x, y, t.bboxes[-1].global_xyz[2] if t.bboxes else 0.0]
             })
 
         return results
- 
+    
 
 class MCTrackTrackerNode:
     LABEL_STR_TO_ID = {
