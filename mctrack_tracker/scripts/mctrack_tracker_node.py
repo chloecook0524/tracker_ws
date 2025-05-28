@@ -449,6 +449,20 @@ def create_text_marker(track, header, marker_id):
 #         markers.markers.append(m)
 #     return markers
 
+def simple_matching_cost(track, det):
+    """
+    거리 + yaw 차이 기반 간단 매칭 cost.
+    낮을수록 좋은 매칭.
+    """
+    dx = track.x[0] - det["position"][0]
+    dy = track.x[1] - det["position"][1]
+    dist = np.hypot(dx, dy)  # 2D 거리
+
+    yaw_diff = abs(track.x[3] - det["yaw"])
+    yaw_penalty = 1.0 - np.cos(yaw_diff)
+
+    cost = dist + 0.3 * yaw_penalty  # weight는 조정 가능
+    return cost
 
 def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
     if cal_flag == "Predict":
@@ -715,31 +729,29 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
             if det["type"] != track.label:
                 continue
 
-            dx = ego_vel * dt * np.cos(ego_yaw)
-            dy = ego_vel * dt * np.sin(ego_yaw)
-            corrected_det_pos = np.array(det["position"][:2]) + np.array([dx, dy])
-            dist = np.linalg.norm(track.x[:2] - corrected_det_pos)
+            # === [1] 거리 계산 (vehicle 좌표 기준) ===
+            dist = np.linalg.norm(track.x[:2] - np.array(det["position"][:2]))
 
-            if use_hybrid_cost and dist > 10.0:
+            # === [2] yaw penalty 계산 ===
+            yaw_diff = abs(track.x[3] - det["yaw"])
+            yaw_penalty = 1.0 - np.cos(yaw_diff)
+
+            # === [3] 최종 cost 계산 ===
+            cost = dist + 0.3 * yaw_penalty
+
+            # === [4] 거리 제한 (필터링) ===
+            if cost > 10.0:
                 continue
 
-            iou_score = (
-                cal_rotation_gdiou_inbev(track, BBox(frame_id=-1, bbox={
-                    "category": det["type"],
-                    "detection_score": det.get("confidence", 0.5),
-                    "lwh": det["size"],
-                    "global_xyz": det["position"][:3],
-                    "global_orientation": [0, 0, 0, 1],
-                    "global_yaw": det["yaw"],
-                    "global_velocity": det.get("velocity", [0.0, 0.0]),
-                    "global_acceleration": [0.0, 0.0],
-                    "bbox_image": {"x1y1x2y2": det.get("reproj_bbox", [0, 0, 0, 0])}
-                }), det["type"], cal_flag="Predict")
-                if use_hybrid_cost else
-                ro_gdiou_2d(track.size[:2], det["size"][:2], track.x[3], det["yaw"])
-            )
+            # === [5] CONFIRMED 트랙 보너스
+            if hasattr(track, "status_flag") and track.status_flag == TrackState.CONFIRMED:
+                cost *= 0.7
 
-            cost_matrix[i, j] = 0.001  # or real cost if needed
+            cost_matrix[i, j] = cost
+
+        # === [7] 디버깅 로그 (선택) ===
+        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+        #     f.write(f"[COST] T#{i} (ID={track.id}) vs D#{j} → dist={dist:.2f}, yaw_diff={yaw_diff:.2f}, cost={cost:.3f}\n")
 
             # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
             #     f.write(f"[COST] T#{i} (ID={track.id}) vs D#{j} → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}\n")
