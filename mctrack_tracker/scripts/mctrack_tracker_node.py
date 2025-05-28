@@ -1723,8 +1723,8 @@ class MCTrackTrackerNode:
             rospy.logdebug(f"[DEBUG] 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
 
             # 4) Ego 상태 업데이트 #자차부정확한경우ㅠ
-            self.ego_vel = msg.ego_vel_x
-            self.ego_yaw_rate = msg.ego_yaw_rate
+            # self.ego_vel = msg.ego_vel_x
+            # self.ego_yaw_rate = msg.ego_yaw_rate
 
             # 5) 트래커 업데이트
             if dt > 0:
