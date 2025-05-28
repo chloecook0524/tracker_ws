@@ -22,6 +22,7 @@ from vdcl_fusion_perception.msg import DetectionObjects
 from chassis_msgs.msg import Chassis
 from pyquaternion import Quaternion
 from geometry_msgs.msg import Point
+from collections import deque
 
 
 # # === Global Path to Baseversion Detection File ===
@@ -1567,6 +1568,7 @@ class MCTrackTrackerNode:
         # self.yaw_sub     = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=1)
         self.chassis_sub = rospy.Subscriber("/chassis", Chassis, self.chassis_callback, queue_size=100)
 
+        self.chassis_buffer = deque(maxlen=100) 
         # 7) ego state 초기화 & 이전 타임스탬프 변수
         self.ego_vel         = 0.0
         self.ego_yaw_rate    = 0.0
@@ -1587,25 +1589,16 @@ class MCTrackTrackerNode:
         self.ego_yaw = msg.data
 
     def chassis_callback(self, msg):
-        try:
-            avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr + msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
-            self.ego_vel = avg_speed_kph / 3.6
-            self.ego_yaw_rate = msg.cr_yrs_yr * np.pi / 180.0
-
-            # === Yaw 계산: 적분 ===
-            current_time = msg.header.stamp.to_sec()
-            if hasattr(self, 'last_chassis_time'):
-                dt = current_time - self.last_chassis_time
-                self.ego_yaw += self.ego_yaw_rate * dt
-                # normalize [-pi, pi]
-                self.ego_yaw = (self.ego_yaw + np.pi) % (2 * np.pi) - np.pi
-            else:
-                self.ego_yaw = 0.0  # 초기 yaw 설정
-            self.last_chassis_time = current_time
-
-        except Exception as e:
-            rospy.logwarn(f"[ChassisCallback] Error parsing chassis msg: {e}")
+        stamp_sec = msg.header.stamp.to_sec()  # ✅ 이 줄 추가
+        self.chassis_buffer.append((stamp_sec, msg))
     
+    def get_nearest_chassis(self, target_stamp):
+        if not self.chassis_buffer:
+            return None
+        times = [abs(t - target_stamp) for (t, _) in self.chassis_buffer]
+        nearest_idx = int(np.argmin(times))
+        return self.chassis_buffer[nearest_idx][1]
+
     def visualization_timer_callback(self, event):
         # 10Hz 주기로 마커 퍼블리시만 담당
         if hasattr(self, "marker_array"):
@@ -1664,7 +1657,13 @@ class MCTrackTrackerNode:
     def detection_callback(self, msg):
         try:
             timestamp_sec = msg.header.stamp.to_sec()
-            rospy.logdebug(f"[DEBUG] detection_callback 시작 (timestamp={timestamp_sec:.6f}, 객체 수={len(msg.objects)})")
+            nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
+            if nearest_chassis_msg:
+                avg_speed_kph = (nearest_chassis_msg.whl_spd_fl + nearest_chassis_msg.whl_spd_fr +
+                                nearest_chassis_msg.whl_spd_rl + nearest_chassis_msg.whl_spd_rr) / 4.0
+                self.ego_vel = avg_speed_kph / 3.6
+                self.ego_yaw_rate = nearest_chassis_msg.cr_yrs_yr * np.pi / 180.0
+            # rospy.logdebug(f"[DEBUG] detection_callback 시작 (timestamp={timestamp_sec:.6f}, 객체 수={len(msg.objects)})")
 
             # 1) dt 계산
             if self.last_time_stamp is None:
@@ -1723,7 +1722,7 @@ class MCTrackTrackerNode:
 
             rospy.logdebug(f"[DEBUG] 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
 
-            # 4) Ego 상태 업데이트
+            # 4) Ego 상태 업데이트 #자차부정확한경우ㅠ
             self.ego_vel = msg.ego_vel_x
             self.ego_yaw_rate = msg.ego_yaw_rate
 
