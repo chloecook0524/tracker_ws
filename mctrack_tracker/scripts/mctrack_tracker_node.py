@@ -1590,7 +1590,7 @@ class MCTrackTrackerNode:
         try:
             avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr + msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
             self.ego_vel = avg_speed_kph / 3.6
-            self.ego_yaw_rate = msg.cr_yrs_yr  # 단위가 rad/s라고 가정
+            self.ego_yaw_rate = msg.cr_yrs_yr * np.pi / 180.0
 
             # === Yaw 계산: 적분 ===
             current_time = msg.header.stamp.to_sec()
