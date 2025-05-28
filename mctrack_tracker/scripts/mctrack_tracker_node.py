@@ -710,16 +710,16 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
     detections = [d for d in detections if d["type"] in VALID_CLASS_IDS]
 
     cost_thresholds = {
-        1: 1.5,   # car
-        2: 1.8,   # truck
-        3: 2.0,   # bus
-        4: 1.8,   # trailer
-        5: 1.8,   # construction_vehicle
-        6: 1.0,   # pedestrian
-        7: 1.2,   # motorcycle
-        8: 1.2,   # bicycle
-        9: 0.8,   # barrier
-        10: 0.7,  # traffic cone
+        1: 1.8,   # car
+        2: 2.0,   # truck
+        3: 2.2,   # bus
+        4: 2.0,   # trailer
+        5: 2.0,   # construction_vehicle
+        6: 1.2,   # pedestrian
+        7: 1.5,   # motorcycle
+        8: 1.5,   # bicycle
+        9: 1.0,   # barrier
+        10: 0.8,  # traffic cone
     }
     default_threshold = 2.2
 
@@ -730,25 +730,33 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
             if det["type"] != track.label:
                 continue
 
-            # === [1] 거리 계산 (vehicle 좌표 기준) ===
-            dist = np.linalg.norm(track.x[:2] - np.array(det["position"][:2]))
+            pos_track = track.x[:2]
+            pos_det = np.array(det["position"][:2])
+            dist = np.linalg.norm(pos_track - pos_det)
 
-            # === [2] yaw penalty 계산 ===
             yaw_diff = abs(track.x[3] - det["yaw"])
             yaw_penalty = 1.0 - np.cos(yaw_diff)
 
-            # === [3] 최종 cost 계산 ===
-            cost = dist + 0.3 * yaw_penalty
+            ro_iou = ro_gdiou_2d(track.size[:2], det["size"][:2], track.x[3], det["yaw"])
+            iou_penalty = 1.0 - ro_iou
 
-            # === [4] 거리 제한 (필터링) ===
-            if cost > 10.0:
-                continue
+            cost = 0.4 * dist + 0.3 * yaw_penalty + 0.3 * iou_penalty
 
-            # === [5] CONFIRMED 트랙 보너스
+            # CONFIRMED 트랙 보너스
             if hasattr(track, "status_flag") and track.status_flag == TrackState.CONFIRMED:
                 cost *= 0.7
 
+            if cost > 10.0:
+                continue
+
             cost_matrix[i, j] = cost
+
+            # ✅ 로깅
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(
+                    f"[HYBRID_COST] T#{i} ID={track.id} vs D#{j} "
+                    f"→ dist={dist:.2f}, yaw_diff={yaw_diff:.2f}, ro_gdiou={ro_iou:.3f}, cost={cost:.3f}\n"
+                )
 
         # === [7] 디버깅 로그 (선택) ===
         # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
@@ -780,13 +788,18 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
         threshold = cost_thresholds.get(label, default_threshold)
         ro_iou = ro_gdiou_2d(tracks[i].size[:2], detections[j]["size"][:2], tracks[i].x[3], detections[j]["yaw"])
 
-        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #     f.write(f"[MATCH_CHECK] T#{i} vs D#{j} → ID={tracks[i].id}, cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}\n")
-
         if cost < threshold:
             matches.append((i, j))
             unmatched_tracks.discard(i)
             unmatched_dets.discard(j)
+        else:
+            log_line = (f"[HUNGARIAN FAIL] T#{i} ID={tracks[i].id} vs D#{j} "
+                        f"→ dist={np.linalg.norm(tracks[i].x[:2] - np.array(detections[j]['position'][:2])):.2f}, "
+                        f"yaw_diff={abs(tracks[i].x[3] - detections[j]['yaw']):.2f}, "
+                        f"cost={cost:.3f}, threshold={threshold:.2f}, ro_gdiou={ro_iou:.3f}")
+            
+            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                f.write(log_line + "\n")
 
     for ti in unmatched_tracks:
         if ti < len(tracks):
@@ -1135,14 +1148,15 @@ class KalmanTrackedObject:
         z = np.array(pos[:2])
         H = np.eye(2, 4)  # position만 관측
         y = z - H @ self.pose_state
-        R = np.diag([0.5, 0.5])  # 관측 잡음 (튜닝 가능)
+        R = np.diag([0.7, 0.7])  # 관측 잡음 (튜닝 가능)
         S = H @ self.pose_P @ H.T + R
         K = self.pose_P @ H.T @ np.linalg.inv(S)
         self.pose_state = self.pose_state + K @ y
         self.pose_P = (np.eye(4) - K @ H) @ self.pose_P
 
         # ✅ 속도는 detection값 반영 (옵션: blending도 가능)
-        self.pose_state[2:] = vel
+        alpha = 0.6
+        self.pose_state[2:] = alpha * self.pose_state[2:] + (1 - alpha) * np.array(vel)
 
         # ✅ 불확실도 리셋 (선택 사항)
         self.pose_P[2:, 2:] = np.eye(2) * 1e-1
@@ -1292,9 +1306,19 @@ class KalmanMultiObjectTracker:
         used = []
         for ti in unmatched_trks:
             track = self.tracks[ti]
+
+            # ✅ 조건 1: CLASS 체크 + 너무 긴 트랙 무시
             if track.label not in CLASS_CONFIG:
                 continue
             if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
+                continue
+
+            # ✅ 조건 2: CONFIRMED 트랙은 fallback 금지 (Hungarian에서 책임져야 함)
+            if track.status_flag == TrackState.CONFIRMED:
+                continue
+
+            # ✅ 조건 3: 트랙 길이가 너무 짧으면 fallback 무시 (불안정한 트랙)
+            if track.traj_length < 5:
                 continue
 
             best_cost = float("inf")
@@ -1316,9 +1340,13 @@ class KalmanMultiObjectTracker:
                 score = ro_gdiou_2d(track.size[:2], det['size'][:2],
                                     track.yaw_state[0], det['yaw'])
 
-                cost = dist + (1.0 - score)  # hybrid cost 기준
+                cost = dist + (1.0 - score)
 
-                if cost < 1.5 and cost < best_cost:
+                # ✅ 조건 4: GDIoU score 기준 강화
+                if score < 0.7:
+                    continue
+
+                if cost < 1.2 and cost < best_cost:
                     best_cost = cost
                     best_det = di
 
@@ -1327,13 +1355,12 @@ class KalmanMultiObjectTracker:
                 confidence = matched_det.get("confidence", 0.5)
                 self.tracks[ti].update(matched_det, dt, matched_score=confidence)
                 used.append(best_det)
+            else:
+                # ✅ fallback 실패 로그 저장
+                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    f.write(f"[FALLBACK FAIL] T#{ti} (ID={track.id}) → no match found among {len(unmatched_dets)} detections\n")
 
-                # ✅ 디버깅 로그 출력
-                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[FALLBACK] T#{ti} (ID={track.id}) ← D#{best_det}: cost={best_cost:.2f}\n")
         return used
-
-
     def update(self, detections, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
         matched_tracks = []
         matched_dets = []
