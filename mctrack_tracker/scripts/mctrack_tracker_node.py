@@ -741,8 +741,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
 
             cost_matrix[i, j] = 0.001  # or real cost if needed
 
-            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                f.write(f"[COST] T#{i} (ID={track.id}) vs D#{j} → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}\n")
+            # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            #     f.write(f"[COST] T#{i} (ID={track.id}) vs D#{j} → IoU={iou_score:.3f}, dist={dist:.2f}, cost={cost_matrix[i,j]:.3f}\n")
     
     # === Hungarian Matching with Exception-Safe lapjv + Logging ===
     try:
@@ -767,8 +767,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
         threshold = cost_thresholds.get(label, default_threshold)
         ro_iou = ro_gdiou_2d(tracks[i].size[:2], detections[j]["size"][:2], tracks[i].x[3], detections[j]["yaw"])
 
-        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-            f.write(f"[MATCH_CHECK] T#{i} vs D#{j} → ID={tracks[i].id}, cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}\n")
+        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+        #     f.write(f"[MATCH_CHECK] T#{i} vs D#{j} → ID={tracks[i].id}, cost={cost:.3f}, thresh={threshold}, ro_gdiou={ro_iou:.3f}\n")
 
         if cost < threshold:
             matches.append((i, j))
@@ -780,8 +780,8 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
             best_di = int(np.argmin(cost_matrix[ti]))
             best_cost = float(cost_matrix[ti][best_di])
             # rospy.loginfo(f"[UNMATCHED] T#{ti} vs best D#{best_di}: cost={best_cost:.2f}")
-            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                f.write(f"[UNMATCHED] T#{ti} vs best D#{best_di}: cost={best_cost:.2f}\n")
+            # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            #     f.write(f"[UNMATCHED] T#{ti} vs best D#{best_di}: cost={best_cost:.2f}\n")
 
     matched_tracks = [tracks[i] for i, _ in matches]
     matched_detections = [detections[j] for _, j in matches]
@@ -1115,19 +1115,31 @@ class KalmanTrackedObject:
 
 
     def update(self, detection, dt, matched_score):
-        # ✅ 덮어쓰기 방식으로 위치/속도 반영
         pos = detection['position']
         vel = detection.get('velocity', [0.0, 0.0])
-        self.pose_state[:2] = pos[:2] 
-        self.pose_state[2:] = vel
-        self.pose_P = np.eye(4) * 1e-3  # 매우 작은 불확실성으로 초기화
 
-        # ✅ Yaw도 덮어쓰기
+        # ✅ [Kalman Update] position 보정 (z = position[:2])
+        z = np.array(pos[:2])
+        H = np.eye(2, 4)  # position만 관측
+        y = z - H @ self.pose_state
+        R = np.diag([0.5, 0.5])  # 관측 잡음 (튜닝 가능)
+        S = H @ self.pose_P @ H.T + R
+        K = self.pose_P @ H.T @ np.linalg.inv(S)
+        self.pose_state = self.pose_state + K @ y
+        self.pose_P = (np.eye(4) - K @ H) @ self.pose_P
+
+        # ✅ 속도는 detection값 반영 (옵션: blending도 가능)
+        self.pose_state[2:] = vel
+
+        # ✅ 불확실도 리셋 (선택 사항)
+        self.pose_P[2:, 2:] = np.eye(2) * 1e-1
+
+        # ✅ Yaw 덮어쓰기 (간단화)
         self.yaw_state[0] = detection['yaw']
         self.yaw_state[1] = 0.0
         self.yaw_P = np.eye(2) * 1e-2
 
-        # ✅ Size도 덮어쓰기
+        # ✅ Size 덮어쓰기
         self.size_state[:2] = detection['size'][:2]
         self.size_P = np.eye(3) * 1e-2
 
@@ -1136,8 +1148,6 @@ class KalmanTrackedObject:
         self.missed_count = 0
         self.hits += 1
         self.traj_length += 1
-        # if self.hits >= self.confirm_threshold:
-        #     self.state = TrackState.CONFIRMED
         self.confidence = detection.get("confidence", 0.5)
 
         if self.traj_length > self.confirm_threshold or (
@@ -1145,6 +1155,7 @@ class KalmanTrackedObject:
             self.confidence > CLASS_CONFIG[self.label]["confirmed_match_score"]
         ):
             self.status_flag = TrackState.CONFIRMED
+
         self.reproj_bbox = detection.get('reproj_bbox')
 
         new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
@@ -1169,7 +1180,7 @@ class KalmanTrackedObject:
             f"status={self.status_flag}, soft_deleted={self.soft_deleted}, missed={self.missed_count}"
         )
         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-            f.write(update_log + "\n")    
+            f.write(update_log + "\n")
 
     def tracking_score(self):
         vel = np.hypot(self.pose_state[2], self.pose_state[3])
@@ -1305,8 +1316,8 @@ class KalmanMultiObjectTracker:
                 used.append(best_det)
 
                 # ✅ 디버깅 로그 출력
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(f"[FALLBACK] T#{ti} (ID={track.id}) ← D#{best_det}: cost={best_cost:.2f}\n")
+                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                #     f.write(f"[FALLBACK] T#{ti} (ID={track.id}) ← D#{best_det}: cost={best_cost:.2f}\n")
         return used
 
 
@@ -1365,36 +1376,36 @@ class KalmanMultiObjectTracker:
             det = detections[di]
             new_track = KalmanTrackedObject(det)
             self.tracks.append(new_track)
-            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                f.write(f"[CREATE] New track ID={new_track.id} class={det['type']} x={det['position'][0]:.2f}, y={det['position'][1]:.2f}\n")
+            # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            #     f.write(f"[CREATE] New track ID={new_track.id} class={det['type']} x={det['position'][0]:.2f}, y={det['position'][1]:.2f}\n")
 
         # ✅ 6) missed_count 증가 먼저
         matched_track_ids = set(t.id for t in matched_tracks)
         for t in self.tracks:
             if t.id not in matched_track_ids:
                 t.missed_count += 1
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(f"[MISSED_INC] ID={t.id}, missed_count={t.missed_count}\n")
+                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                #     f.write(f"[MISSED_INC] ID={t.id}, missed_count={t.missed_count}\n")
 
         # ✅ 7) Soft-delete vs Hard-delete 판단 (missed_count 증가 반영됨)
         for t in self.tracks:
             if t.status_flag == TrackState.CONFIRMED:
                 if t.missed_count > t.max_missed + 10:
                     t.soft_deleted = True
-                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                        f.write(f"[SOFT_DELETE] ID={t.id}, status=CONFIRMED, missed={t.missed_count}, allowed={t.max_missed + 5}\n")
+                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    #     f.write(f"[SOFT_DELETE] ID={t.id}, status=CONFIRMED, missed={t.missed_count}, allowed={t.max_missed + 5}\n")
             else:
                 if t.missed_count > t.max_missed:
                     t.soft_deleted = True
-                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                        f.write(f"[SOFT_DELETE] ID={t.id}, status={t.status_flag}, missed={t.missed_count}, allowed={t.max_missed}\n")
+                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    #     f.write(f"[SOFT_DELETE] ID={t.id}, status={t.status_flag}, missed={t.missed_count}, allowed={t.max_missed}\n")
 
 
-        # 8) 삭제 직전 로깅
-        for t in self.tracks:
-            if t.soft_deleted and t.missed_count > t.max_missed + 10:
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(f"[DELETE] ID={t.id} deleted | missed={t.missed_count}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
+        # # 8) 삭제 직전 로깅
+        # for t in self.tracks:
+        #     if t.soft_deleted and t.missed_count > t.max_missed + 10:
+        #         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+        #             f.write(f"[DELETE] ID={t.id} deleted | missed={t.missed_count}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
 
         # 9) 실제 제거
         self.tracks = [
@@ -1828,4 +1839,4 @@ if __name__ == '__main__':
         MCTrackTrackerNode()
         rospy.spin()
     except rospy.ROSInterruptException:
-        pass
+        pass 
