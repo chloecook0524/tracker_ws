@@ -1187,7 +1187,6 @@ class KalmanTrackedObject:
         # self.yaw_state[1] = 0.0
         # self.yaw_P = np.eye(2) * 1e-2
 
-        # === Yaw 제한 보정 with 튐 누적 보완 ===
         # === Yaw 제한 보정 with 튐 누적 보완 + 속도 기반 억제 ===
         def normalize_angle(angle):
             return (angle + np.pi) % (2 * np.pi) - np.pi
