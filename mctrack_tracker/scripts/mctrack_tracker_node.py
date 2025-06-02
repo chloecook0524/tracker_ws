@@ -148,7 +148,7 @@ def create_ego_marker(stamp):
     marker.mesh_resource = "package://vdcl_fusion_perception/marker_dae/Car.dae"
     marker.mesh_use_embedded_materials = True
 
-    marker.pose.position.x = 1.5
+    marker.pose.position.x = 0.0
     marker.pose.position.y = 0.0
     marker.pose.position.z = 0.0
 
@@ -184,8 +184,7 @@ def create_single_track_marker(track, header, marker_id):
     
     # ✅ Z 위치 보정 (중심 기준)
     z_base = track["position"][2]
-    z_center = z_base + track["size"][2] / 2.0
-    m.pose.position.z = z_center
+    m.pose.position.z = z_base
 
     
     q = tf.transformations.quaternion_from_euler(0, 0, track["yaw"])
@@ -239,6 +238,34 @@ def create_text_marker(track, header, marker_id):
     t_m.color.b = 1.0
     t_m.text = str(track["id"])
     return t_m
+
+def create_arrow_marker(track, header, marker_id):
+    vx, vy = track.get("velocity", [0.0, 0.0])
+    speed = math.hypot(vx, vy)
+
+    arrow = Marker()
+    arrow.header = header
+    arrow.ns = "track_arrows"
+    arrow.id = marker_id
+    arrow.type = Marker.ARROW
+    arrow.action = Marker.ADD
+    arrow.scale.x = 0.2
+    arrow.scale.y = 0.5
+    arrow.scale.z = 0.3
+    arrow.color.a = 1.0 if speed > 0.1 else 0.0
+    arrow.color.r = 1.0
+    arrow.color.g = 1.0
+    arrow.color.b = 1.0
+
+    z_base = track["position"][2]
+    z_center = z_base + track["size"][2] / 2.0
+    if track["type"] == 3:  # 🟡 bus
+        z_center += 5.0
+
+    arrow.points.append(Point(x=track["x"], y=track["y"], z=z_center))
+    arrow.points.append(Point(x=track["x"] + vx, y=track["y"] + vy, z=z_center))
+
+    return arrow
 
 def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
     if cal_flag == "Predict":
@@ -1165,6 +1192,7 @@ class KalmanMultiObjectTracker:
             if not (t.soft_deleted and t.missed_count > t.max_missed + 3)
         ]
 
+
         # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
         #     for t in self.tracks:
         #         f.write(f"[STATE] ID={t.id}, cls={t.label}, hits={t.hits}, missed={t.missed_count}, traj_len={t.traj_length}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
@@ -1381,7 +1409,7 @@ class MCTrackTrackerNode:
 
                 det = {
                     "id":           i,
-                    "position":     [obj.x +1.5, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
+                    "position":     [obj.x, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
                     "yaw":          obj.yaw,
                     "size":         [obj.l, obj.w, obj.h],
                     "type":         label,
@@ -1423,7 +1451,7 @@ class MCTrackTrackerNode:
                 ta.tracks.append(m)
 
             # === [7] RViz 마커 시각화 ===
-            vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
+            vis_header = Header(frame_id="lidar", stamp=msg.header.stamp)
 
             # 1. 현재 ID 모음
             current_ids = set(t["id"] for t in tracks)
@@ -1467,52 +1495,10 @@ class MCTrackTrackerNode:
                 text_marker = create_text_marker(t, vis_header, 1000 + t["id"])
                 if text_marker is not None:
                     self.marker_array.markers.append(text_marker)
+                
+                arrow_marker = create_arrow_marker(t, vis_header, 2000 + t["id"])
 
-                # ✅ [New] 속도 방향 화살표 추가
-                vx, vy = t.get("velocity", [0.0, 0.0]) if "velocity" in t else [0.0, 0.0]
-                speed = math.hypot(vx, vy)
-                dx = vx
-                dy = vy
-
-                arrow = Marker()
-                arrow.header = vis_header
-                arrow.ns = "track_arrows"
-                arrow.id = 2000 + t["id"]
-                arrow.type = Marker.ARROW
-                arrow.action = Marker.ADD
-                arrow.scale.x = 0.2
-                arrow.scale.y = 0.5
-                arrow.scale.z = 0.3
-
-                # 🔽 속도 기반 투명도 제어
-                if speed > 0.1:
-                    arrow.color.a = 1.0
-                else:
-                    arrow.color.a = 0.0  # 완전 투명 (화살표는 존재하지만 안 보임)
-
-                arrow.color.r = 1.0
-                arrow.color.g = 1.0
-                arrow.color.b = 1.0
-
-                z_base = t["position"][2]
-                z_center = z_base + t["size"][2] / 2.0
-
-                # 🟡 버스(type=3)일 경우만 높이 +2.0m
-                if t["type"] == 3:
-                    z_center += 5.0
-
-                arrow.points.append(Point(
-                    x=t["x"],
-                    y=t["y"],
-                    z=z_center
-                ))
-                arrow.points.append(Point(
-                    x=t["x"] + vx,
-                    y=t["y"] + vy,
-                    z=z_center
-                ))
-
-                self.marker_array.markers.append(arrow)
+                self.marker_array.markers.append(arrow_marker)
     
             # 6. 자차 마커 추가
             ego_marker = create_ego_marker(vis_header.stamp)
