@@ -25,10 +25,6 @@ from geometry_msgs.msg import Point
 from collections import deque
 
 
-# # === Global Path to Baseversion Detection File ===
-# BASE_DET_JSON = "/home/chloe/SOTA/MCTrack/data/base_version/nuscenes/centerpoint/val.json"
-# GT_JSON_PATH = "/home/chloe/nuscenes_gt_valsplit.json"
-
 # === BBox 클래스 (bbox.py 내용 통합) ===
 class BBox:
     def __init__(self, frame_id, bbox, **kwargs):
@@ -43,42 +39,32 @@ class BBox:
         self.global_yaw = bbox["global_yaw"]
         self.global_velocity = bbox["global_velocity"]
         self.global_acceleration = bbox["global_acceleration"]
+
+        # 초기 상태를 그대로 복사해서 fusion/predict용으로 사용
         self.global_velocity_fusion = self.global_velocity
         self.global_acceleration_fusion = self.global_acceleration
         self.global_yaw_fusion = self.global_yaw
         self.lwh_fusion = self.lwh
+
+        # 속도 변화 추정 (단순 초기화)
         self.global_velocity_diff = [0, 0]
         self.global_velocity_curve = [0, 0]
+
+        # 위치 + 크기 + 각도 통합 표현
         self.global_xyz_lwh_yaw = self.global_xyz + list(self.lwh) + [self.global_yaw]
+
+        # 과거 위치 추정 (보간 가능)
         self.global_xyz_last = self.backward_prediction()
         self.global_xyz_lwh_yaw_last = self.global_xyz_last + list(self.lwh) + [self.global_yaw]
+
         self.global_xyz_lwh_yaw_predict = self.global_xyz_lwh_yaw
         self.global_xyz_lwh_yaw_fusion = self.global_xyz_lwh_yaw
-        self.camera_type = bbox["bbox_image"].get("camera_type", None)
-        self.x1y1x2y2 = bbox["bbox_image"].get("x1y1x2y2", [0.0, 0.0, 0.0, 0.0])
-        self.x1y1x2y2_fusion = self.x1y1x2y2
-        self.x1y1x2y2_predict = self.x1y1x2y2
         self.unmatch_length = 0
 
     def backward_prediction(self):
         last_xy = np.array(self.global_xyz[:2]) - np.array(self.global_velocity) * 0.5
         return last_xy.tolist() + [self.global_xyz[2]]
     
-    def transform_bbox_tlbr2xywh(self, x1y1x2y2=None):
-        if x1y1x2y2 is None:
-            x1y1x2y2 = self.x1y1x2y2
-        center_x = (x1y1x2y2[0] + x1y1x2y2[2]) / 2
-        center_y = (x1y1x2y2[1] + x1y1x2y2[3]) / 2
-        width = x1y1x2y2[2] - x1y1x2y2[0]
-        height = x1y1x2y2[3] - x1y1x2y2[1]
-        return np.array([center_x, center_y, width, height])
-
-    def transform_bbox_xywh2tlbr(self, xywh):
-        x1 = xywh[0] - (xywh[2] / 2)
-        y1 = xywh[1] - (xywh[3] / 2)
-        x2 = xywh[0] + (xywh[2] / 2)
-        y2 = xywh[1] + (xywh[3] / 2)
-        return np.array([x1, y1, x2, y2])
 
     def transform_3dbox2corners(self, global_xyz_lwh_yaw) -> np.ndarray:
         from pyquaternion import Quaternion  # ensure imported
@@ -109,86 +95,6 @@ class BBox:
         corners[2, :] += z
         return corners.T   
 
-def box_to_polygon(x, y, size, yaw):
-    corners = compute_bev_corners([x, y], size[:2], yaw)
-    return Polygon(corners)
-
-
-# def debug_track_vs_gt(tracks, gt_tracks, class_name):
-#     # rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] GT 매칭 시작...")
-
-#     class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
-#     if not class_id:
-#         rospy.logwarn(f"[DEBUG] class_name={class_name} not found in CLASS_NAME_MAP")
-#         return
-#     class_id = class_id[0]
-
-#     pred_tracks = [t for t in tracks if t["type"] == class_id]
-#     gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
-
-#     for pt in pred_tracks:
-#         px, py = pt["x"], pt["y"]
-#         psize = pt["size"]
-#         pyaw = pt["yaw"]
-#         ppoly = box_to_polygon(px, py, psize, pyaw)
-
-#         matched = False
-
-#         for gt in gt_objs:
-#             gx, gy = gt["translation"][:2]
-#             gsize = gt["size"]
-#             gyaw = quaternion_to_yaw(gt)
-#             gpoly = box_to_polygon(gx, gy, gsize, gyaw)
-
-#             dist = np.hypot(px - gx, py - gy)
-#             iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area if (ppoly.is_valid and gpoly.is_valid) else 0.0
-#             yaw_error = np.abs(np.arctan2(np.sin(pyaw - gyaw), np.cos(pyaw - gyaw)))
-
-#             rospy.loginfo(f"[{class_name.upper()}] Track ID={pt['id']} ↔ GT dist={dist:.2f}m, yaw_diff={yaw_error:.2f}rad, IoU={iou:.3f}")
-#             rospy.loginfo(f"   ↪ Track size={psize}, yaw={pyaw:.2f}, GT size={gsize}, yaw={gyaw:.2f}")
-#             if not ppoly.is_valid or not gpoly.is_valid:
-#                 rospy.logwarn(f"[POLY-INVALID] Track ID={pt['id']} has invalid polygon.")
-#             if dist < 10.0 and iou < 0.05:
-#                 rospy.logwarn(f"[NO-MATCH] distance OK ({dist:.2f}m) but IoU too low → yaw misalign or size mismatch?")
-#             if iou >= 0.5:
-#                 matched = True
-#                 break
-
-#         # if not matched:
-#         #     rospy.logwarn(f"[MISS] No matching GT for Track ID={pt['id']} (class={class_name})")
-
-#     rospy.loginfo(f"▶ [DEBUG][{class_name.upper()}] 완료. 트랙 수={len(pred_tracks)}, GT 수={len(gt_objs)}")
-
-# def compute_track_recall(tracks, gt_tracks, class_name, iou_thresh=0.5):
-#     class_id = [k for k, v in CLASS_NAME_MAP.items() if v == class_name]
-#     if not class_id:
-#         return
-#     class_id = class_id[0]
-
-#     pred_tracks = [t for t in tracks if t["type"] == class_id]
-#     gt_objs = [g for g in gt_tracks if g.get("tracking_name") == class_name]
-
-#     matched_gt = set()
-#     for pt in pred_tracks:
-#         px, py = pt["x"], pt["y"]
-#         psize = pt["size"]
-#         pyaw = pt["yaw"]
-#         ppoly = box_to_polygon(px, py, psize, pyaw)
-
-#         for i, gt in enumerate(gt_objs):
-#             gx, gy = gt["translation"][:2]
-#             gsize = gt["size"]
-#             gyaw = quaternion_to_yaw(gt)
-#             gpoly = box_to_polygon(gx, gy, gsize, gyaw)
-#             if not gpoly.is_valid or not ppoly.is_valid:
-#                 continue
-#             iou = ppoly.intersection(gpoly).area / gpoly.union(ppoly).area
-#             if iou >= iou_thresh:
-#                 matched_gt.add(i)
-#                 break  # 한 GT와 매칭되면 종료
-
-#     recall = len(matched_gt) / len(gt_objs) if gt_objs else 0.0
-#     rospy.loginfo(f"[RECALL] {class_name} matched: {len(matched_gt)}/{len(gt_objs)} (Recall={recall:.3f})")
 
 def cal_rotation_iou_inbev(pose1, pose2):
     import cv2
@@ -212,49 +118,6 @@ def cal_rotation_iou_inbev(pose1, pose2):
         union = 0.0
     return iou, union
 
-def compute_bev_corners(center, size, yaw):
-    """
-    3D 박스의 중심 (x, y), 크기 (w, l), yaw 회전값을 받아
-    BEV 상의 4개 코너 좌표를 반환합니다. (회전 적용)
-    """
-    x, y = center
-    w, l = size
-    corners = np.array([
-        [w/2, l/2],
-        [w/2, -l/2],
-        [-w/2, -l/2],
-        [-w/2, l/2]
-    ])
-
-    rotation = np.array([
-        [np.cos(yaw), -np.sin(yaw)],
-        [np.sin(yaw),  np.cos(yaw)]
-    ])
-
-    rotated = corners @ rotation.T
-    translated = rotated + np.array([x, y])
-    return translated  # shape: (4, 2)
-
-def polygon_iou(poly1, poly2):
-    """
-    두 사각형 폴리곤 (4x2 numpy array)의 IoU 계산
-    (shapely 없이 수동 구현 가능하나, 간단히 shapely 사용 권장)
-    """
-    try:
-        from shapely.geometry import Polygon
-    except ImportError:
-        raise ImportError("Please install shapely: pip install shapely")
-
-    poly1 = Polygon(poly1)
-    poly2 = Polygon(poly2)
-
-    if not poly1.is_valid or not poly2.is_valid:
-        return 0.0
-
-    inter = poly1.intersection(poly2).area
-    union = poly1.union(poly2).area
-    return inter / union if union > 0 else 0.0
-
 def get_class_weights(class_id):
     weights = {
         1: (0.5, 1.5),  # car
@@ -274,19 +137,6 @@ def orientation_similarity(angle1_rad, angle2_rad):
     cosine_similarity = math.cos((angle1_rad - angle2_rad + np.pi) % (2 * np.pi) - np.pi)
     return (cosine_similarity + 1.0) / 2.0
 
-def bbox_iou_2d(bbox1, bbox2):
-    if not bbox1 or not bbox2:
-        return 0.0
-    x1 = max(bbox1[0], bbox2[0])
-    y1 = max(bbox1[1], bbox2[1])
-    x2 = min(bbox1[2], bbox2[2])
-    y2 = min(bbox1[3], bbox2[3])
-    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
-    area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
-    union = area1 + area2 - inter_area
-    return inter_area / union if union > 0 else 0.0
-
 def create_ego_marker(stamp):
     marker = Marker()
     marker.header.frame_id = "vehicle"
@@ -298,7 +148,7 @@ def create_ego_marker(stamp):
     marker.mesh_resource = "package://vdcl_fusion_perception/marker_dae/Car.dae"
     marker.mesh_use_embedded_materials = True
 
-    marker.pose.position.x = 0.0
+    marker.pose.position.x = 1.5
     marker.pose.position.y = 0.0
     marker.pose.position.z = 0.0
 
@@ -329,14 +179,15 @@ def create_single_track_marker(track, header, marker_id):
     m.action = Marker.ADD
     m.type = Marker.MESH_RESOURCE
     m.mesh_use_embedded_materials = True
-    m.pose.position.x = track["x"]
+    m.pose.position.x = track["x"] 
     m.pose.position.y = track["y"]
     
     # ✅ Z 위치 보정 (중심 기준)
-    z_base = track["position"][2] if "position" in track and len(track["position"]) > 2 else 0.0
+    z_base = track["position"][2]
     z_center = z_base + track["size"][2] / 2.0
     m.pose.position.z = z_center
 
+    
     q = tf.transformations.quaternion_from_euler(0, 0, track["yaw"])
     m.pose.orientation.x = q[0]
     m.pose.orientation.y = q[1]
@@ -369,6 +220,9 @@ def create_single_track_marker(track, header, marker_id):
     return m
 
 def create_text_marker(track, header, marker_id):
+    # 🎯 특정 클래스는 ID 마커 생략
+    if track["type"] in [9, 10]:  # 9: barrier, 10: traffic cone
+        return None
     t_m = Marker()
     t_m.header = header
     t_m.ns = "track_ids"
@@ -385,85 +239,6 @@ def create_text_marker(track, header, marker_id):
     t_m.color.b = 1.0
     t_m.text = str(track["id"])
     return t_m
-
-# def quaternion_to_yaw(obj):
-#     """
-#     GT object에서 rotation(quaternion) → yaw(rad) 로 변환
-#     (NuScenes [w, x, y, z] 순서를 [x, y, z, w]로 변환 후 yaw 추출)
-#     bicycle / motorcycle 클래스만 출력
-#     """
-#     rotation = obj.get("rotation", None)
-#     name = obj.get("tracking_name", "")
-    
-#     if rotation and isinstance(rotation, list) and len(rotation) == 4:
-#         try:
-#             w, x, y, z = rotation
-#             q = [x, y, z, w]
-#             _, _, yaw = euler_from_quaternion(q)
-
-#             # if name in ("bicycle", "motorcycle"):
-#             #     rospy.loginfo(f"[quat→yaw] {name} → NuScenes q=[w={w:.3f}, x={x:.3f}, y={y:.3f}, z={z:.3f}] → yaw={yaw:.3f}")
-            
-#             return yaw
-#         except Exception as e:
-#             rospy.logwarn(f"[quat→yaw] {name} 변환 실패: {e}")
-#             return 0.0
-#     else:
-#         if name in ("bicycle", "motorcycle"):
-#             rospy.logwarn(f"[quat→yaw] {name} rotation 필드 없음 또는 포맷 오류")
-#         return 0.0
-
-
-# def create_gt_markers(gt_tracks, header):
-#     markers = MarkerArray()
-#     for i, obj in enumerate(gt_tracks):
-#         m = Marker()
-#         m.header = header
-#         m.ns = "gt_boxes"
-#         m.id = 2000 + i
-#         m.type = Marker.CUBE
-#         m.action = Marker.ADD
-#         pos = obj.get('translation', [0,0,0])
-#         size = obj.get('size', [1,1,1])
-#         yaw = quaternion_to_yaw(obj) 
-
-#         m.pose.position.x = pos[0]
-#         m.pose.position.y = pos[1]
-#         m.pose.position.z = 1.0  # 높이 중간
-
-#         from tf.transformations import quaternion_from_euler
-#         q = quaternion_from_euler(0, 0, yaw)
-#         m.pose.orientation.x = q[0]
-#         m.pose.orientation.y = q[1]
-#         m.pose.orientation.z = q[2]
-#         m.pose.orientation.w = q[3]
-
-#         m.scale.x = size[0]
-#         m.scale.y = size[1]
-#         m.scale.z = size[2]
-
-#         m.color.a = 0.4
-#         m.color.r = 0.0
-#         m.color.g = 0.5
-#         m.color.b = 1.0
-
-#         markers.markers.append(m)
-#     return markers
-
-def simple_matching_cost(track, det):
-    """
-    거리 + yaw 차이 기반 간단 매칭 cost.
-    낮을수록 좋은 매칭.
-    """
-    dx = track.x[0] - det["position"][0]
-    dy = track.x[1] - det["position"][1]
-    dist = np.hypot(dx, dy)  # 2D 거리
-
-    yaw_diff = abs(track.x[3] - det["yaw"])
-    yaw_penalty = 1.0 - np.cos(yaw_diff)
-
-    cost = dist + 0.3 * yaw_penalty  # weight는 조정 가능
-    return cost
 
 def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
     if cal_flag == "Predict":
@@ -512,34 +287,6 @@ def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
 
     return ro_gdiou
 
-def sdiou_2d(bbox1, bbox2):
-    """Scale-Dependent IoU"""
-    if not bbox1 or not bbox2:
-        return 0.0
-    x1 = max(bbox1[0], bbox2[0])
-    y1 = max(bbox1[1], bbox2[1])
-    x2 = min(bbox1[2], bbox2[2])
-    y2 = min(bbox1[3], bbox2[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (bbox1[2]-bbox1[0]) * (bbox1[3]-bbox1[1])
-    area2 = (bbox2[2]-bbox2[0]) * (bbox2[3]-bbox2[1])
-    union = area1 + area2 - inter
-    if area1 == 0 or area2 == 0:
-        rospy.logwarn(f"[SDIoU] Invalid area1={area1}, area2={area2}, bbox1={bbox1}, bbox2={bbox2}")
-    iou = inter / union if union > 0 else 0.0
-
-    cx1 = (bbox1[0] + bbox1[2]) / 2
-    cy1 = (bbox1[1] + bbox1[3]) / 2
-    cx2 = (bbox2[0] + bbox2[2]) / 2
-    cy2 = (bbox2[1] + bbox2[3]) / 2
-    center_dist = (cx1 - cx2)**2 + (cy1 - cy2)**2
-
-    scale = (bbox1[2]-bbox1[0]) * (bbox1[3]-bbox1[1]) + \
-            (bbox2[2]-bbox2[0]) * (bbox2[3]-bbox2[1])
-    scale = max(scale, 1e-4)
-
-    penalty = center_dist / (scale + 1e-6)
-    return iou - 0.05 * penalty 
 
 
 def bbox_iou_2d(bbox1, bbox2):
@@ -587,62 +334,6 @@ def _get_class_distance_threshold(label):
     pedestrian_like = [6, 7, 8]
     return 1.5 if label in pedestrian_like else 3.0
 
-def _get_reproj_iou_thresh(label):
-    if label in [6, 7, 8]:  # pedestrian, motorcycle, bicycle
-        return 0.2
-    elif label in [1, 2, 3, 4]:  # car, truck, bus, trailer
-        return 0.3
-    return 0.25
-
-# === Reprojection Matching Function ===
-def image_plane_matching(tracks, detections):
-    matches = []
-    unmatched_tracks = set(range(len(tracks)))
-    unmatched_dets = set(range(len(detections)))
-
-    # cost_matrix 정의
-    cost_matrix = np.zeros((len(tracks), len(detections)))  # 비용 행렬 초기화
-
-    for ti, track in enumerate(tracks):
-        best_iou, best_di = -1.0, -1
-        for di, det in enumerate(detections):
-            if det['type'] != track.label:
-                continue
-            bbox1 = getattr(track, 'reproj_bbox', None)
-            bbox2 = det.get('reproj_bbox', None)
-            if bbox1 is None or bbox2 is None:
-                continue
-
-            # 트래킹 객체와 디텍션 객체 간의 거리 계산
-            dx = track.pose_state[0] - det["position"][0]  # track.x 대신 track.pose_state[0] 사용
-            dy = track.pose_state[1] - det["position"][1]  # track.y 대신 track.pose_state[1] 사용
-            dist = np.hypot(dx, dy)
-
-            # 거리 기준이 특정 임계값을 초과하면 매칭을 고려하지 않음
-            if dist > _get_class_distance_threshold(track.label):
-                continue
-
-            # IoU 계산 (또는 다른 계산 방식으로 비용 행렬을 업데이트)
-            iou = bbox_iou_2d(bbox1, bbox2)
-            threshold = _get_reproj_iou_thresh(track.label)
-
-            # 비용 행렬에 IoU 값을 저장
-            cost_matrix[ti, di] = 1 - iou  # IoU를 기반으로 비용 계산 (1 - IoU로 설정하여 IoU가 클수록 비용이 낮게 설정)
-
-            # 최상의 매칭을 찾기 위해 조건을 비교
-            if iou > best_iou and iou > threshold:
-                best_iou = iou
-                best_di = di
-
-        if best_di >= 0:
-            matches.append((ti, best_di))
-            unmatched_tracks.discard(ti)
-            unmatched_dets.discard(best_di)
-
-    rospy.loginfo(f"[Image Matching] Attempted {len(tracks)} tracks vs {len(detections)} detections")
-    rospy.loginfo(f"[Image Matching] Matched {len(matches)} tracks with detections.")
-    return matches, list(unmatched_dets), list(unmatched_tracks)
-
 def get_confirmed_bonus(label):
     """
     클래스별 CONFIRMED 트랙에 대한 cost 보너스 비율 반환
@@ -654,61 +345,6 @@ def get_confirmed_bonus(label):
         return 0.85
     else:
         return 0.8
-
-def image_plane_matching_sdiou(tracks, detections):
-    matches = []
-    unmatched_tracks = set(range(len(tracks)))
-    unmatched_dets = set(range(len(detections)))
-
-    if len(tracks) == 0 or len(detections) == 0:
-        return matches, list(unmatched_dets), list(unmatched_tracks)
-
-    # cost_matrix 정의
-    cost_matrix = np.zeros((len(tracks), len(detections)))  # 여기에 cost_matrix를 정의합니다.
-
-    for ti, track in enumerate(tracks):
-        best_iou, best_di = -1.0, -1
-        for di, det in enumerate(detections):
-            if det['type'] != track.label:
-                continue
-            bbox1 = getattr(track, 'reproj_bbox', None)
-            bbox2 = det.get('reproj_bbox', None)
-            if bbox1 is None or bbox2 is None:
-                rospy.logwarn(f"[SDIoU] Missing bbox: track_id={track.id}, bbox1={bbox1}, bbox2={bbox2}")
-                continue
-            if bbox1 is not None and bbox2 is not None:
-                iou_val = sdiou_2d(bbox1, bbox2)
-                # rospy.loginfo(f"[RV-Match][SDIoU={iou_val:.3f}] bbox1={bbox1}, bbox2={bbox2}")
-
-            dx = track.pose_state[0] - det["position"][0]  # track.x 대신 track.pose_state[0] 사용
-            dy = track.pose_state[1] - det["position"][1]  # track.y 대신 track.pose_state[1] 사용
-            dist = np.hypot(dx, dy)
-            if dist > _get_class_distance_threshold(track.label):
-                continue
-
-            # IoU 계산
-            sdiou = sdiou_2d(bbox1, bbox2)
-            if sdiou <= 0:
-                continue
-            # rospy.loginfo(f"[SDIoU-Match] Track ID: {track.id}, Det idx: {di}, bbox1={bbox1}, bbox2={bbox2}, SDIoU: {sdiou:.3f}")
-            threshold = _get_reproj_iou_thresh(track.label)
-            
-            # 비용 행렬 업데이트
-            cost_matrix[ti, di] = 1.0 - sdiou
-
-            if sdiou > best_iou and sdiou >= threshold:  # NOTE: threshold는 -0.3이므로 "크거나 같다" 체크
-                best_iou = sdiou
-                best_di = di
-
-        if best_di >= 0:
-            matches.append((ti, best_di))
-            unmatched_tracks.discard(ti)
-            unmatched_dets.discard(best_di)
-
-    # 여기에 로그 추가
-    # rospy.loginfo(f"IMAGEPLANESDIOU Cost Matrix: {cost_matrix}")  # 이제 cost_matrix가 정의되었으므로 로깅이 가능합니다.
-
-    return matches, list(unmatched_dets), list(unmatched_tracks)
 
 
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
@@ -755,14 +391,13 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
                 cost = 0.5 * dist + 0.3 * yaw_penalty + 0.2 * iou_penalty
             else:
                 cost = 0.4 * dist + 0.3 * yaw_penalty + 0.3 * iou_penalty
-            cost = 0.4 * dist + 0.3 * yaw_penalty + 0.3 * iou_penalty
-            if track.label in [6, 7, 8]:
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(
-                        f"[HYBRID_COST][CLS={track.label}] T#{i} ID={track.id} status={track.status_flag} "
-                        f"traj_len={track.traj_length} missed={track.missed_count} → "
-                        f"dist={dist:.2f}, yaw_diff={yaw_diff:.2f}, ro_gdiou={ro_iou:.3f}, cost={cost:.3f}\n"
-                    )
+            # if track.label in [6, 7, 8]:
+            #     with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            #         f.write(
+            #             f"[HYBRID_COST][CLS={track.label}] T#{i} ID={track.id} status={track.status_flag} "
+            #             f"traj_len={track.traj_length} missed={track.missed_count} → "
+            #             f"dist={dist:.2f}, yaw_diff={yaw_diff:.2f}, ro_gdiou={ro_iou:.3f}, cost={cost:.3f}\n"
+            #         )
 
             if hasattr(track, "status_flag") and track.status_flag == TrackState.CONFIRMED:
                 cost *= get_confirmed_bonus(track.label)
@@ -812,14 +447,14 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
             matches.append((i, j))
             unmatched_tracks.discard(i)
             unmatched_dets.discard(j)
-        else:
-            if label in [6, 7, 8]:  # 소형 객체만 로깅
-                log_line = (f"[HUNGARIAN FAIL] CLS={label} T#{i} ID={tracks[i].id} vs D#{j} "
-                            f"→ dist={np.linalg.norm(tracks[i].x[:2] - np.array(detections[j]['position'][:2])):.2f}, "
-                            f"yaw_diff={abs(tracks[i].x[3] - detections[j]['yaw']):.2f}, "
-                            f"cost={cost:.3f}, threshold={threshold:.2f}, ro_gdiou={ro_iou:.3f}")
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(log_line + "\n")
+        # else:
+        #     if label in [6, 7, 8]:  # 소형 객체만 로깅
+        #         log_line = (f"[HUNGARIAN FAIL] CLS={label} T#{i} ID={tracks[i].id} vs D#{j} "
+        #                     f"→ dist={np.linalg.norm(tracks[i].x[:2] - np.array(detections[j]['position'][:2])):.2f}, "
+        #                     f"yaw_diff={abs(tracks[i].x[3] - detections[j]['yaw']):.2f}, "
+        #                     f"cost={cost:.3f}, threshold={threshold:.2f}, ro_gdiou={ro_iou:.3f}")
+        #         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+        #             f.write(log_line + "\n")
 
     # for ti in unmatched_tracks:
     #     if ti < len(tracks):
@@ -1029,22 +664,17 @@ CLASS_CONFIG = {
     }
 }
 
-VALID_CLASSES = set(CLASS_CONFIG.keys())  # ex: {0, 1, 2, ..., 6}
-
 # === KalmanTrackedObject (1/2) ===
 class KalmanTrackedObject:
     def __init__(self, detection, obj_id=None):
         self.id = obj_id or (uuid.uuid4().int & 0xFFFF)
         self.label = detection['type']
         wlh = detection.get('size', [1.0, 1.0, 1.0])
-        self.reproj_bbox = detection.get('reproj_bbox')
         self.traj_length = 1
         self.use_smoothing = False  
         self.status_flag = TrackState.INITIALIZATION 
         self.hits = 1
         self.yaw_drift_buffer = deque(maxlen=5)
-        # self.state = TrackState.CONFIRMED if self.hits >= self.confirm_threshold else TrackState.TENTATIVE
-        # self.status_flag = TrackState.INITIALIZATION
         px, py = detection['position'][:2]
         vx, vy = detection.get("velocity", [0.0, 0.0])
         self.pose_state = np.array([px, py, vx, vy])
@@ -1133,7 +763,6 @@ class KalmanTrackedObject:
             "global_yaw": self.yaw_state[0],
             "global_velocity": self.pose_state[2:].tolist(),
             "global_acceleration": [0.0, 0.0],
-            "bbox_image": {"x1y1x2y2": [0, 0, 0, 0]}
         }
 
         pred_bbox = BBox(frame_id=pred_dict["frame_id"], bbox=pred_dict)
@@ -1267,7 +896,6 @@ class KalmanTrackedObject:
         ):
             self.status_flag = TrackState.CONFIRMED
 
-        self.reproj_bbox = detection.get('reproj_bbox')
 
         new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
             "category": self.label,
@@ -1278,9 +906,6 @@ class KalmanTrackedObject:
             "global_yaw": detection["yaw"],
             "global_velocity": detection.get("velocity", [0.0, 0.0]),
             "global_acceleration": [0.0, 0.0],
-            "bbox_image": {
-                "x1y1x2y2": detection.get("reproj_bbox", [0.0, 0.0, 0.0, 0.0])
-            }
         })
         self.bboxes.append(new_bbox)
         if len(self.bboxes) > 30:
@@ -1324,7 +949,6 @@ class KalmanMultiObjectTracker:
         self.tracks = []
         self.use_hungarian = use_hungarian
         self.use_hybrid_cost = use_hybrid_cost
-        self.use_rv_matching = False
 
     def predict(self, dt, ego_vel, ego_yaw_rate, ego_yaw):
         for t in self.tracks:
@@ -1363,19 +987,11 @@ class KalmanMultiObjectTracker:
                 score = ro_gdiou_2d(track.size[:2], det['size'][:2],
                                     track.yaw_state[0], det['yaw'])
 
-                bbox1 = getattr(track, 'reproj_bbox', None)
-                bbox2 = det.get('reproj_bbox', None)
-                if bbox1 and bbox2:
-                    iou = bbox_iou_2d(bbox1, bbox2)
-                    if iou < 0.02:
-                        # 예외로 허용하되 로그는 남김
-                        with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                            f.write(f"[REID WARN] ID={track.id} low IoU: {iou:.3f}, but continuing\n")
 
                 if score <= 0.5:
                     # 완화, 다만 낮으면 경고
-                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                        f.write(f"[REID WARN] ID={track.id} low GDIoU: {score:.3f}\n")
+                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                    #     f.write(f"[REID WARN] ID={track.id} low GDIoU: {score:.3f}\n")
                     continue
 
                 if score > best_score:
@@ -1388,8 +1004,8 @@ class KalmanMultiObjectTracker:
                 best_track.update(det, dt, matched_score=confidence)
                 best_track.hits += 1
                 used.append(di)
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(f"[REID SUCCESS] ID={best_track.id} with det ID={di}, score={best_score:.3f}\n")
+                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                #     f.write(f"[REID SUCCESS] ID={best_track.id} with det ID={di}, score={best_score:.3f}\n")
 
         return used
 
@@ -1455,14 +1071,14 @@ class KalmanMultiObjectTracker:
                 confidence = matched_det.get("confidence", 0.5)
                 self.tracks[ti].update(matched_det, dt, matched_score=confidence)
                 used.append(best_det)
-            else:
-                if track.label in [6, 7, 8]:  # 소형 객체만 추가 로깅
-                    with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                        f.write(
-                            f"[FALLBACK FAIL][CLS={track.label}] T#{ti} ID={track.id} "
-                            f"traj_len={track.traj_length}, missed={track.missed_count}, "
-                            f"status={track.status_flag} → no match among {len(unmatched_dets)} dets\n"
-                        )
+            # else:
+            #     if track.label in [6, 7, 8]:  # 소형 객체만 추가 로깅
+            #         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+            #             f.write(
+            #                 f"[FALLBACK FAIL][CLS={track.label}] T#{ti} ID={track.id} "
+            #                 f"traj_len={track.traj_length}, missed={track.missed_count}, "
+            #                 f"status={track.status_flag} → no match among {len(unmatched_dets)} dets\n"
+            #             )
         return used
     def update(self, detections, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
         matched_tracks = []
@@ -1483,32 +1099,12 @@ class KalmanMultiObjectTracker:
             for tr, det in zip(matched_trks, matched_dets):
                 tr.update(det, dt, matched_score=det.get("confidence", 0.5))
 
-        # 🔽 여기에 추가 🔽
         for ti in unmatched_trks:
             track = self.tracks[ti]
             if track.traj_length <= 1 and track.missed_count > 0:
                 track.soft_deleted = True
-                with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    f.write(f"[DELETE EARLY] ID={track.id} traj_len={track.traj_length}, missed={track.missed_count} → soft_deleted\n")
-
-        # 2) SDIoU (RV) matching — only if enabled
-        if self.use_rv_matching and unmatched_trks and unmatched_dets:
-            # pass only the leftovers
-            tracks_for_s = [self.tracks[i] for i in unmatched_trks]
-            dets_for_s   = [detections[i] for i in unmatched_dets]
-            matches_s, new_unmatched_dets, new_unmatched_trks = image_plane_matching_sdiou(
-                tracks_for_s, dets_for_s
-            )
-            # remap back to absolute indices
-            rem_trks = [unmatched_trks[i] for i in new_unmatched_trks]
-            rem_dets = [unmatched_dets[i]   for i in new_unmatched_dets]
-            # update matched
-            for rel_ti, rel_di in matches_s:
-                abs_t = unmatched_trks[rel_ti]
-                abs_d = unmatched_dets[rel_di]
-                self.tracks[abs_t].update(detections[abs_d], dt)
-            unmatched_trks = rem_trks
-            unmatched_dets = rem_dets
+                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+                #     f.write(f"[DELETE EARLY] ID={track.id} traj_len={track.traj_length}, missed={track.missed_count} → soft_deleted\n")
 
         # 3) Fallback matching
         if unmatched_trks and unmatched_dets:
@@ -1530,9 +1126,9 @@ class KalmanMultiObjectTracker:
             self.tracks.append(new_track)
             num_new_tracks += 1
 
-        if num_new_tracks >= 10:
-            with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                f.write(f"[WARNING] {num_new_tracks} new tracks created in one frame!\n")
+        # if num_new_tracks >= 10:
+        #     with open("/tmp/mctrack_cost_debug.txt", "a") as f:
+        #         f.write(f"[WARNING] {num_new_tracks} new tracks created in one frame!\n")
                 
         # ✅ 6) missed_count 증가 먼저
         matched_track_ids = set(t.id for t in matched_tracks)
@@ -1543,9 +1139,10 @@ class KalmanMultiObjectTracker:
                 #     f.write(f"[MISSED_INC] ID={t.id}, missed_count={t.missed_count}\n")
 
         # ✅ 7) Soft-delete vs Hard-delete 판단 (missed_count 증가 반영됨)
+        MAX_EXTRA_MISSES_FOR_DELETE = 10
         for t in self.tracks:
             if t.status_flag == TrackState.CONFIRMED:
-                if t.missed_count > t.max_missed + 10:
+                if t.missed_count > t.max_missed + MAX_EXTRA_MISSES_FOR_DELETE:
                     t.soft_deleted = True
                     # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
                     #     f.write(f"[SOFT_DELETE] ID={t.id}, status=CONFIRMED, missed={t.missed_count}, allowed={t.max_missed + 5}\n")
@@ -1568,7 +1165,6 @@ class KalmanMultiObjectTracker:
             if not (t.soft_deleted and t.missed_count > t.max_missed + 3)
         ]
 
-        # 🔻 여기에 추가하세요 🔻
         # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
         #     for t in self.tracks:
         #         f.write(f"[STATE] ID={t.id}, cls={t.label}, hits={t.hits}, missed={t.missed_count}, traj_len={t.traj_length}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
@@ -1642,62 +1238,24 @@ class MCTrackTrackerNode:
         # 1) 반드시 init_node 부터 호출
         rospy.init_node("mctrack_tracker_node", anonymous=True)
         self.tracking_timer = rospy.Timer(rospy.Duration(0.1), self.tracking_publish_callback)  # 10Hz
-        # rospy.loginfo("[Tracker] 초기화 시작")
-
-        # # 2) logger_ready 파라미터가 올라올 때까지 대기 (최대 15초)
-        # rospy.loginfo("[Tracker] /logger_ready 기다리는 중…")
-        # start = rospy.Time.now()
-        # while not rospy.has_param("/logger_ready") and (rospy.Time.now() - start) < rospy.Duration(15.0):
-        #     if rospy.is_shutdown():
-        #         return
-        #     rospy.sleep(0.1)
-        # if rospy.has_param("/logger_ready"):
-        #     rospy.loginfo("[Tracker] /logger_ready 감지, 시작합니다")
-        # else:
-        #     rospy.logwarn("[Tracker] /logger_ready 대기 타임아웃, 계속 진행")
-
-        # # 3) GT JSON 로드
-        # with open(GT_JSON_PATH, 'r') as f:
-        #     raw = json.load(f)
-        # raw_results = raw.get("results", {})
-        # if isinstance(raw_results, dict):
-        #     self.gt_data = raw_results
-        # else:
-        #     self.gt_data = {}
-        #     for ann in raw_results:
-        #         token = ann.get("sample_token") or ann.get("token")
-        #         if token:
-        #             self.gt_data.setdefault(token, []).append(ann)
-
-        # self.total_frames = len(self.gt_data)
         self.frame_idx    = 0
         self.start_time   = rospy.Time.now()
         self.marker_array = MarkerArray()
         self.prev_track_ids = set()  # 트랙 ID 관리
         
-        # # === Static TF (map → base_link) 퍼블리시 세팅 ===
-        # self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
-        # self.publish_static_tf()
-
         # 4) Kalman 트래커 초기화
-        use_rv_matching = False   
         use_hybrid = True   
 
         self.tracker = KalmanMultiObjectTracker(
             use_hungarian=True,
             use_hybrid_cost=use_hybrid
         )
-        self.tracker.use_rv_matching = use_rv_matching
         self.tracker.use_confidence_filtering = True
         # 5) 퍼블리셔 생성 & 구독자 연결 대기
         self.tracking_pub = rospy.Publisher("/tracking/objects",
                                             PfGMFATrackArray,
                                             queue_size=100)
         self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)                                    
-        # rospy.loginfo("[Tracker] /tracking/objects 구독자 기다리는 중…")
-        # while self.tracking_pub.get_num_connections() == 0 and not rospy.is_shutdown():
-        #     rospy.sleep(0.1)
-        # rospy.loginfo("[Tracker] 구독자 연결 완료, 리플레이어 구독 시작")
 
         # 6) 리플레이어 콜백 구독
         self.detection_sub = rospy.Subscriber("/detection_objects",
@@ -1705,9 +1263,6 @@ class MCTrackTrackerNode:
                                               self.detection_callback,
                                               queue_size= 500,
                                               tcp_nodelay=True)
-        # self.vel_sub     = rospy.Subscriber("/ego_vel_x", Float32, self.vel_callback, queue_size=1)
-        # self.yawrate_sub = rospy.Subscriber("/ego_yaw_rate", Float32, self.yawrate_callback, queue_size=1)
-        # self.yaw_sub     = rospy.Subscriber("/ego_yaw", Float32, self.yaw_callback, queue_size=1)
         self.chassis_sub = rospy.Subscriber("/chassis", Chassis, self.chassis_callback, queue_size=100)
 
         self.chassis_buffer = deque(maxlen=100) 
@@ -1716,19 +1271,9 @@ class MCTrackTrackerNode:
         self.ego_yaw_rate    = 0.0
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
-        # self.last_token = None
         self.marker_timer = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
-
-    def vel_callback(self, msg):
-        self.ego_vel = msg.data
-
-    def yawrate_callback(self, msg):
-        self.ego_yaw_rate = msg.data
-
-    def yaw_callback(self, msg):
-        self.ego_yaw = msg.data
 
     def chassis_callback(self, msg):
         stamp_sec = msg.header.stamp.to_sec()  # ✅ 이 줄 추가
@@ -1779,22 +1324,6 @@ class MCTrackTrackerNode:
         self.vis_pub.publish(self.marker_array)
         self.marker_array = MarkerArray()  # 비우기
 
-    def publish_static_tf(self):
-        static_tf = geometry_msgs.msg.TransformStamped()
-        static_tf.header.stamp = rospy.Time.now()
-        static_tf.header.frame_id = "map"
-        static_tf.child_frame_id = "base_link"
-        static_tf.transform.translation.x = 0.0
-        static_tf.transform.translation.y = 0.0
-        static_tf.transform.translation.z = 0.0
-        q = tf.transformations.quaternion_from_euler(0, 0, 0)
-        static_tf.transform.rotation.x = q[0]
-        static_tf.transform.rotation.y = q[1]
-        static_tf.transform.rotation.z = q[2]
-        static_tf.transform.rotation.w = q[3]
-        self.static_broadcaster.sendTransform(static_tf)
-
-        # rospy.loginfo("🛰️ [Tracker] Static TF (map → base_link) published.")    
 
     def detection_callback(self, msg):
         try:
@@ -1852,11 +1381,10 @@ class MCTrackTrackerNode:
 
                 det = {
                     "id":           i,
-                    "position":     [obj.x, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
+                    "position":     [obj.x +1.5, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
                     "yaw":          obj.yaw,
                     "size":         [obj.l, obj.w, obj.h],
                     "type":         label,
-                    "reproj_bbox":  obj.boundingbox if len(obj.boundingbox) == 4 else [0.0] * 4,
                     "velocity":     [obj.vx, obj.vy],
                     "confidence":   obj.score
                 }
@@ -1893,7 +1421,6 @@ class MCTrackTrackerNode:
                 m.id             = int(t["id"])
                 m.obj_class      = t["type"]
                 ta.tracks.append(m)
-            # self.tracking_pub.publish(ta)
 
             # === [7] RViz 마커 시각화 ===
             vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
@@ -1938,10 +1465,12 @@ class MCTrackTrackerNode:
                 self.marker_array.markers.append(marker)
 
                 text_marker = create_text_marker(t, vis_header, 1000 + t["id"])
-                self.marker_array.markers.append(text_marker)
+                if text_marker is not None:
+                    self.marker_array.markers.append(text_marker)
 
                 # ✅ [New] 속도 방향 화살표 추가
                 vx, vy = t.get("velocity", [0.0, 0.0]) if "velocity" in t else [0.0, 0.0]
+                speed = math.hypot(vx, vy)
                 dx = vx
                 dy = vy
 
@@ -1954,13 +1483,23 @@ class MCTrackTrackerNode:
                 arrow.scale.x = 0.2
                 arrow.scale.y = 0.5
                 arrow.scale.z = 0.3
-                arrow.color.a = 1.0
+
+                # 🔽 속도 기반 투명도 제어
+                if speed > 0.1:
+                    arrow.color.a = 1.0
+                else:
+                    arrow.color.a = 0.0  # 완전 투명 (화살표는 존재하지만 안 보임)
+
                 arrow.color.r = 1.0
                 arrow.color.g = 1.0
-                arrow.color.b = 1.0  # 흰색
+                arrow.color.b = 1.0
 
-                z_base = t["position"][2] if "position" in t and len(t["position"]) > 2 else 0.0
+                z_base = t["position"][2]
                 z_center = z_base + t["size"][2] / 2.0
+
+                # 🟡 버스(type=3)일 경우만 높이 +2.0m
+                if t["type"] == 3:
+                    z_center += 5.0
 
                 arrow.points.append(Point(
                     x=t["x"],
@@ -1968,8 +1507,8 @@ class MCTrackTrackerNode:
                     z=z_center
                 ))
                 arrow.points.append(Point(
-                    x=t["x"] + dx,
-                    y=t["y"] + dy,
+                    x=t["x"] + vx,
+                    y=t["y"] + vy,
                     z=z_center
                 ))
 
