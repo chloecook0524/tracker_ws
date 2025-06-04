@@ -863,16 +863,17 @@ class KalmanTrackedObject:
             self.yaw_drift_buffer.popleft()
 
         mean_drift = np.mean(self.yaw_drift_buffer)
-
-        # ✅ 현재 속도에 따라 yaw 보정 계수 설정
         v = np.linalg.norm(self.pose_state[2:4])
-        if v < 0.3:
-            coeff = 0.1  # 정지: yaw 고정
-        elif v < 2.0:
-            coeff = 0.2  # 저속: 약한 보정
-        else:
-            coeff = 0.4  # 고속: 강한 보정
+        yaw_drift = abs(mean_drift)
 
+        if yaw_drift > np.radians(3):  # 회전 감지 (디텍션 기반이긴 하지만 방향성 충분)
+            coeff = 0.3
+        elif v < 0.3:
+            coeff = 0.1
+        elif v < 1.0:
+            coeff = 0.2
+        else:
+            coeff = 0.4
         if abs(mean_drift) < 0.5:
             self.yaw_state[0] += coeff * mean_drift
             self.yaw_state[0] = normalize_angle(self.yaw_state[0])
