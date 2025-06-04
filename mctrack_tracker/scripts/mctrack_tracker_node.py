@@ -841,7 +841,7 @@ class KalmanTrackedObject:
         self.pose_P = (np.eye(4) - K @ H) @ self.pose_P
 
         # ✅ 속도는 detection값 반영 (옵션: blending도 가능)
-        alpha = 0.6
+        alpha = 0.5
         self.pose_state[2:] = alpha * self.pose_state[2:] + (1 - alpha) * np.array(vel)
 
         # ✅ 불확실도 리셋 (선택 사항)
