@@ -1174,10 +1174,28 @@ class KalmanMultiObjectTracker:
             used_r = self._reid_soft_deleted_tracks(unmatched_dets, detections, dt)
             unmatched_dets = [d for d in unmatched_dets if d not in used_r]
         
-        # 5) New track 생성
+        # 5) New track 생성 (중복 방지 필터 포함)
         num_new_tracks = 0
         for di in unmatched_dets:
             det = detections[di]
+
+            # 💡 트랙 생성 전에 중복 체크
+            is_duplicate = False
+            for t in self.tracks:
+                if t.label != det["type"]:
+                    continue
+                if t.status_flag != TrackState.CONFIRMED:
+                    continue
+                dist = np.linalg.norm(t.x[:2] - det["position"][:2])
+                if dist > 1.5:
+                    continue
+                score = ro_gdiou_2d(t.size[:2], det['size'][:2], t.x[3], det['yaw'])
+                if score > 0.7:  # 🎯 유사한 트랙 존재
+                    is_duplicate = True
+                    break
+            if is_duplicate:
+                continue  # 새 트랙 생성하지 않음
+
             new_track = KalmanTrackedObject(det)
             self.tracks.append(new_track)
             num_new_tracks += 1
@@ -1294,41 +1312,51 @@ class MCTrackTrackerNode:
     def __init__(self):
         # 1) 반드시 init_node 부터 호출
         rospy.init_node("mctrack_tracker_node", anonymous=True)
-        self.tracking_timer = rospy.Timer(rospy.Duration(0.1), self.tracking_publish_callback)  # 10Hz
-        self.frame_idx    = 0
-        self.start_time   = rospy.Time.now()
-        self.marker_array = MarkerArray()
-        self.prev_track_ids = set()  # 트랙 ID 관리
-        
-        # 4) Kalman 트래커 초기화
-        use_hybrid = True   
 
+        # === [A] 타이머들 초기화 ===
+        self.tracking_timer = rospy.Timer(rospy.Duration(0.1), self.tracking_publish_callback)  # 기존 퍼블리시 루프
+        self.marker_timer   = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)  # RViz 마커용 루프
+        # self.predict_timer  = rospy.Timer(rospy.Duration(0.1), self.tracker_loop)  # ✅ 트래커 예측 루프 (10Hz)
+
+        self.last_predict_time = None  # ✅ 트래커 루프용 시간 변수
+
+        self.frame_idx       = 0
+        self.start_time      = rospy.Time.now()
+        self.marker_array    = MarkerArray()
+        self.prev_track_ids  = set()
+
+        # 4) Kalman 트래커 초기화
+        use_hybrid = True
         self.tracker = KalmanMultiObjectTracker(
             use_hungarian=True,
             use_hybrid_cost=use_hybrid
         )
         self.tracker.use_confidence_filtering = True
+
         # 5) 퍼블리셔 생성 & 구독자 연결 대기
         self.tracking_pub = rospy.Publisher("/tracking/objects",
                                             PfGMFATrackArray,
                                             queue_size=100)
-        self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)                                    
+        self.vis_pub = rospy.Publisher("/tracking/markers", MarkerArray, queue_size=10)
 
         # 6) 리플레이어 콜백 구독
         self.detection_sub = rospy.Subscriber("/detection_objects",
-                                              DetectionObjects,
-                                              self.detection_callback,
-                                              queue_size= 500,
-                                              tcp_nodelay=True)
-        self.chassis_sub = rospy.Subscriber("/chassis", Chassis, self.chassis_callback, queue_size=100)
+                                            DetectionObjects,
+                                            self.detection_callback,
+                                            queue_size=500,
+                                            tcp_nodelay=True)
+        self.chassis_sub = rospy.Subscriber("/chassis",
+                                            Chassis,
+                                            self.chassis_callback,
+                                            queue_size=100)
 
-        self.chassis_buffer = deque(maxlen=100) 
-        # 7) ego state 초기화 & 이전 타임스탬프 변수
+        self.chassis_buffer = deque(maxlen=100)
+
+        # 7) Ego 상태 변수
         self.ego_vel         = 0.0
         self.ego_yaw_rate    = 0.0
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
-        self.marker_timer = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
@@ -1371,6 +1399,25 @@ class MCTrackTrackerNode:
             ta.tracks.append(m)
 
         self.tracking_pub.publish(ta)
+
+    def tracker_loop(self, event):
+        now = rospy.Time.now()
+        if self.last_predict_time is None:
+            self.last_predict_time = now
+            return
+
+        dt = (now - self.last_predict_time).to_sec()
+        self.last_predict_time = now
+
+        if dt <= 0:
+            return
+
+        dx = self.ego_vel * dt * np.cos(self.ego_yaw)
+        dy = self.ego_vel * dt * np.sin(self.ego_yaw)
+        dyaw = self.ego_yaw_rate * dt
+
+        self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
+        self.tracker.predict_all(dt)
 
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
@@ -1445,7 +1492,7 @@ class MCTrackTrackerNode:
                 }
                 detections.append(det)
 
-            # [5] Kalman Tracker 업데이트
+            # [5] Ego-motion 보상 + Kalman 예측 그리고 트래커 업데이트
             if dt > 0:
                 dx = self.ego_vel * dt * np.cos(self.ego_yaw)
                 dy = self.ego_vel * dt * np.sin(self.ego_yaw)
@@ -1453,9 +1500,11 @@ class MCTrackTrackerNode:
 
                 self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
                 self.tracker.predict_all(dt)
-                self.tracker.update(detections, dt)
             else:
                 rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
+
+                
+            self.tracker.update(detections, dt)
 
             # [6] 트랙 결과 변환 및 퍼블리시 메시지 생성
             tracks = self.tracker.get_tracks()
