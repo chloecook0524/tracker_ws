@@ -867,7 +867,7 @@ class KalmanTrackedObject:
         # ✅ 현재 속도에 따라 yaw 보정 계수 설정
         v = np.linalg.norm(self.pose_state[2:4])
         if v < 0.3:
-            coeff = 0.05  # 정지: yaw 고정
+            coeff = 0.1  # 정지: yaw 고정
         elif v < 2.0:
             coeff = 0.2  # 저속: 약한 보정
         else:
