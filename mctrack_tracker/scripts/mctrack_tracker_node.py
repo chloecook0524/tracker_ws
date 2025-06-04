@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-import rospy
-import numpy as np
+# 표준 라이브러리
 import uuid
 import json
-from std_msgs.msg import Header, Float32
-from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
-from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
-from scipy.optimize import linear_sum_assignment
-from visualization_msgs.msg import Marker, MarkerArray
-import tf2_ros
-import geometry_msgs.msg
-import tf.transformations
-import traceback
-from typing import List, Dict
-from shapely.geometry import Polygon
-from tf.transformations import euler_from_quaternion
-from lap import lapjv
-import cv2
 import math
-from vdcl_fusion_perception.msg import DetectionObjects
-from chassis_msgs.msg import Chassis
-from pyquaternion import Quaternion
-from geometry_msgs.msg import Point
+import traceback
 from collections import deque
 
+# 타입 힌트
+from typing import List, Dict
+
+# 외부 라이브러리
+import numpy as np
+import cv2
+from shapely.geometry import Polygon
+from pyquaternion import Quaternion
+from scipy.optimize import linear_sum_assignment
+from lap import lapjv
+
+# ROS 관련
+import rospy
+import tf
+import tf.transformations
+from std_msgs.msg import Header, Float32
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+
+# 메시지 정의 (커스텀 포함)
+from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
+from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
+from vdcl_fusion_perception.msg import DetectionObjects
+from chassis_msgs.msg import Chassis
 
 # === BBox 클래스 (bbox.py 내용 통합) ===
 class BBox:
@@ -148,7 +154,7 @@ def create_ego_marker(stamp):
     marker.mesh_resource = "package://vdcl_fusion_perception/marker_dae/Car.dae"
     marker.mesh_use_embedded_materials = True
 
-    marker.pose.position.x = 0.0
+    marker.pose.position.x = 1.5
     marker.pose.position.y = 0.0
     marker.pose.position.z = 0.0
 
@@ -386,14 +392,14 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
     cost_thresholds = {
         1: 1.8,   # car
         2: 2.0,   # truck
-        3: 2.2,   # bus
+        3: 2.0,   # bus
         4: 2.0,   # trailer
         5: 2.0,   # construction_vehicle
-        6: 0.9,   # pedestrian
-        7: 1.8,   # motorcycle
-        8: 1.5,   # bicycle
-        9: 1.0,   # barrier
-        10: 0.8,  # traffic cone
+        6: 2.0,   # pedestrian
+        7: 2.0,   # motorcycle
+        8: 2.0,   # bicycle
+        9: 1.8,   # barrier
+        10: 2.0,  # traffic cone
     }
     default_threshold = 2.2
 
@@ -765,6 +771,9 @@ class KalmanTrackedObject:
         F[0, 2] = dt
         F[1, 3] = dt
         self.pose_state = F @ self.pose_state
+        # ✅ 여기! 감쇠 적용
+        self.pose_state[2:] *= 0.7  # 감쇠율은 0.6~0.9 사이 튜닝 가능
+
         self.pose_P = F @ self.pose_P @ F.T + self.pose_Q
 
         Fy = np.eye(2)
@@ -858,7 +867,7 @@ class KalmanTrackedObject:
         # ✅ 현재 속도에 따라 yaw 보정 계수 설정
         v = np.linalg.norm(self.pose_state[2:4])
         if v < 0.3:
-            coeff = 0.0  # 정지: yaw 고정
+            coeff = 0.05  # 정지: yaw 고정
         elif v < 2.0:
             coeff = 0.2  # 저속: 약한 보정
         else:
@@ -956,6 +965,18 @@ class KalmanTrackedObject:
         score = (self.hits / (self.age + 1e-3)) * vel_consistency * (1.0 - traj_penalty) * age_bonus
         return max(0.1, min(1.0, score))
 
+    def apply_ego_compensation(self, dx, dy, dyaw):
+        cos_yaw = np.cos(-dyaw)
+        sin_yaw = np.sin(-dyaw)
+
+        rel_x = self.pose_state[0]
+        rel_y = self.pose_state[1]
+
+        self.pose_state[0] = cos_yaw * rel_x - sin_yaw * rel_y - dx
+        self.pose_state[1] = sin_yaw * rel_x + cos_yaw * rel_y - dy
+        self.yaw_state[0] -= dyaw
+        self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
+
     @property
     def x(self):  # alias for existing usage
         return np.array([
@@ -980,6 +1001,14 @@ class KalmanMultiObjectTracker:
     def predict(self, dt, ego_vel, ego_yaw_rate, ego_yaw):
         for t in self.tracks:
             t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
+    
+    def apply_ego_compensation_to_all(self, dx, dy, dyaw):
+        for track in self.tracks:
+            track.apply_ego_compensation(dx, dy, dyaw)
+
+    def predict_all(self, dt):
+        for track in self.tracks:
+            track.predict(dt)
 
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
     def _reid_soft_deleted_tracks(self,
@@ -1304,7 +1333,7 @@ class MCTrackTrackerNode:
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
     def chassis_callback(self, msg):
-        stamp_sec = msg.header.stamp.to_sec()  # ✅ 이 줄 추가
+        stamp_sec = msg.header.stamp.to_sec()  
         self.chassis_buffer.append((stamp_sec, msg))
     
     def get_nearest_chassis(self, target_stamp):
@@ -1326,7 +1355,7 @@ class MCTrackTrackerNode:
         tracks = self.tracker.get_tracks()
 
         ta = PfGMFATrackArray()
-        ta.header.stamp = rospy.Time.now()  # 또는 self.last_time_stamp
+        ta.header.stamp = rospy.Time.now() 
         ta.header.frame_id = "vehicle"
 
         for t in tracks:
@@ -1350,11 +1379,12 @@ class MCTrackTrackerNode:
             else:
                 marker.action = Marker.DELETE
         self.vis_pub.publish(self.marker_array)
-        self.marker_array = MarkerArray()  # 비우기
+        self.marker_array = MarkerArray()  
 
 
     def detection_callback(self, msg):
         try:
+            # [1] 타임스탬프 계산 및 자차 상태 추정
             timestamp_sec = msg.header.stamp.to_sec()
             nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
             if nearest_chassis_msg:
@@ -1362,37 +1392,37 @@ class MCTrackTrackerNode:
                                 nearest_chassis_msg.whl_spd_rl + nearest_chassis_msg.whl_spd_rr) / 4.0
                 self.ego_vel = avg_speed_kph / 3.6
                 self.ego_yaw_rate = nearest_chassis_msg.cr_yrs_yr * np.pi / 180.0
-            # rospy.logdebug(f"[DEBUG] detection_callback 시작 (timestamp={timestamp_sec:.6f}, 객체 수={len(msg.objects)})")
 
-            # 1) dt 계산
+            # [2] 시간 간격 계산 (dt)
             if self.last_time_stamp is None:
                 dt = 0.0
             else:
                 dt = (msg.header.stamp - self.last_time_stamp).to_sec()
             self.last_time_stamp = msg.header.stamp
 
+            # if nearest_chassis_msg:
+            #     timestamp_det = msg.header.stamp.to_sec()
+            #     timestamp_ego = nearest_chassis_msg.header.stamp.to_sec()
+            #     time_diff = timestamp_det - timestamp_ego
+
+            #     rospy.loginfo(
+            #         f"[EGO] vel={self.ego_vel:.2f} m/s, yaw_rate={np.degrees(self.ego_yaw_rate):.2f} deg/s, "
+            #         f"dt={dt:.3f}s, det_ts={timestamp_det:.6f}, ego_ts={timestamp_ego:.6f}, diff={time_diff:.3f}s"
+            #     )
+
             self.frame_idx += 1
             rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
 
-            # 2) 동일 timestamp 반복 수신 방지
+            # [3] 동일 타임스탬프 중복 수신 방지
             if hasattr(self, "last_timestamp_sec") and abs(timestamp_sec - self.last_timestamp_sec) < 1e-6:
                 rospy.logwarn(f"[WARN] 동일한 timestamp가 반복 수신됨: {timestamp_sec:.6f}")
             self.last_timestamp_sec = timestamp_sec
 
-            # 3) Detection 변환 (VALID_CLASSES 필터링 포함)
+            # [4] Detection 메시지 → 내부 dict 포맷으로 변환 + 필터링
             VALID_CLASSES = set(CLASS_CONFIG.keys())
-            # class_min_confidence = {k: 0.0 for k in VALID_CLASSES}
             class_min_confidence = {
-                1: 0.03,   # car
-                2: 0.03,   # truck
-                3: 0.03,   # bus
-                4: 0.03,   # trailer
-                5: 0.02,   # construction vehicle
-                6: 0.08,   # pedestrian 
-                7: 0.02,   # motorcycle
-                8: 0.02,   # bicycle
-                9: 0.02,   # barrier
-                10: 0.01   # traffic cone 
+                1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.02,
+                6: 0.08, 7: 0.02, 8: 0.02, 9: 0.02, 10: 0.01
             }
             detections = []
             for i, obj in enumerate(msg.objects):
@@ -1400,40 +1430,34 @@ class MCTrackTrackerNode:
                 label = self.LABEL_STR_TO_ID.get(label_str, -1)
 
                 if label not in VALID_CLASSES:
-                    # rospy.logwarn(f"[SKIP] Unknown or ignored class '{obj.label}' → mapped id: {label}")
                     continue
-
                 if obj.score < class_min_confidence.get(label, 0.0):
-                    # rospy.loginfo(f"[SKIP] Low confidence {obj.score:.3f} for class '{obj.label}'")
                     continue
 
                 det = {
-                    "id":           i,
-                    "position":     [obj.x, obj.y, obj.z],  # ← 기존 [obj.x, obj.y] → z 추가
-                    "yaw":          obj.yaw,
-                    "size":         [obj.l, obj.w, obj.h],
-                    "type":         label,
-                    "velocity":     [obj.vx, obj.vy],
-                    "confidence":   obj.score
+                    "id":         i,
+                    "position":   [obj.x, obj.y, obj.z],
+                    "yaw":        obj.yaw,
+                    "size":       [obj.l, obj.w, obj.h],
+                    "type":       label,
+                    "velocity":   [obj.vx, obj.vy],
+                    "confidence": obj.score
                 }
                 detections.append(det)
 
-            rospy.logdebug(f"[DEBUG] 변환된 detections: count={len(detections)}, ids={[d['id'] for d in detections]}")
-
-            # 4) Ego 상태 업데이트 #자차부정확한경우ㅠ
-            # self.ego_vel = msg.ego_vel_x
-            # self.ego_yaw_rate = msg.ego_yaw_rate
-
-            # 5) 트래커 업데이트
+            # [5] Kalman Tracker 업데이트
             if dt > 0:
-                self.tracker.update(detections, dt,
-                            ego_vel=self.ego_vel,
-                            ego_yaw_rate=self.ego_yaw_rate,
-                            ego_yaw=self.ego_yaw)
+                dx = self.ego_vel * dt * np.cos(self.ego_yaw)
+                dy = self.ego_vel * dt * np.sin(self.ego_yaw)
+                dyaw = self.ego_yaw_rate * dt
+
+                self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
+                self.tracker.predict_all(dt)
+                self.tracker.update(detections, dt)
             else:
                 rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
 
-            # 6) 트랙 퍼블리시
+            # [6] 트랙 결과 변환 및 퍼블리시 메시지 생성
             tracks = self.tracker.get_tracks()
             rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
 
@@ -1450,19 +1474,19 @@ class MCTrackTrackerNode:
                 m.obj_class      = t["type"]
                 ta.tracks.append(m)
 
-            # === [7] RViz 마커 시각화 ===
+            # [7] RViz 시각화를 위한 Marker 생성 및 관리
             vis_header = Header(frame_id="lidar", stamp=msg.header.stamp)
 
-            # 1. 현재 ID 모음
+            # [7.1] 현재 존재하는 트랙 ID 확인
             current_ids = set(t["id"] for t in tracks)
 
-            # 2. 이전에 있었지만 지금은 없는 → 삭제 대상
+            # [7.2] 삭제 대상 마커 결정
             deleted_ids = getattr(self, "prev_track_ids", set()) - current_ids
 
-            # 3. 새 마커 array로 초기화
+            # [7.3] MarkerArray 초기화
             self.marker_array = MarkerArray()
 
-            # 4. 삭제 마커 추가
+            # [7.4] 삭제 마커 생성
             for tid in deleted_ids:
                 delete_marker = Marker()
                 delete_marker.header = vis_header
@@ -1485,9 +1509,7 @@ class MCTrackTrackerNode:
                 delete_arrow.action = Marker.DELETE
                 self.marker_array.markers.append(delete_arrow)
 
-
-
-            # 5. 현재 트랙 마커 추가
+            # [7.5] 트랙 마커 추가
             for t in tracks:
                 marker = create_single_track_marker(t, vis_header, t["id"])
                 self.marker_array.markers.append(marker)
@@ -1495,23 +1517,23 @@ class MCTrackTrackerNode:
                 text_marker = create_text_marker(t, vis_header, 1000 + t["id"])
                 if text_marker is not None:
                     self.marker_array.markers.append(text_marker)
-                
-                arrow_marker = create_arrow_marker(t, vis_header, 2000 + t["id"])
 
+                arrow_marker = create_arrow_marker(t, vis_header, 2000 + t["id"])
                 self.marker_array.markers.append(arrow_marker)
-    
-            # 6. 자차 마커 추가
+
+            # [7.6] 자차 마커 추가
             ego_marker = create_ego_marker(vis_header.stamp)
             self.marker_array.markers.append(ego_marker)
 
-            # 7. 퍼블리시
+            # [7.7] MarkerArray 퍼블리시
             self.vis_pub.publish(self.marker_array)
 
-            # 8. 트랙 ID 갱신
+            # [7.8] 이전 트랙 ID 저장
             self.prev_track_ids = current_ids
+
         except Exception as e:
             rospy.logerr(f"[detection_callback] Unexpected error: {e}\n{traceback.format_exc()}")
-            
+
 if __name__ == '__main__':
     open("/tmp/mctrack_cost_debug.txt", "w").close() 
     try:
