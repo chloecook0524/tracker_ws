@@ -862,7 +862,7 @@ class KalmanTrackedObject:
         self.pose_state[2:] = alpha * self.pose_state[2:] + (1 - alpha) * np.array(vel)
 
         # ✅ 불확실도 리셋 (선택 사항)
-        self.pose_P[2:, 2:] = np.eye(2) * 1e-1
+        # self.pose_P[2:, 2:] = np.eye(2) * 1e-1
 
         # # ✅ Yaw 덮어쓰기 (간단화)
         # self.yaw_state[0] = detection['yaw']
