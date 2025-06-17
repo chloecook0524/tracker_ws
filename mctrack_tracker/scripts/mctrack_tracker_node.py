@@ -1366,7 +1366,9 @@ class MCTrackTrackerNode:
 
         if dt <= 0:
             return
+
         self.tracker.predict(dt)
+
 
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
@@ -1382,13 +1384,18 @@ class MCTrackTrackerNode:
         try:
             # [1] 타임스탬프 계산 및 자차 상태 추정
             timestamp_sec = msg.header.stamp.to_sec()
-            # ✅ 최초 예측 시간 초기화
+
+            # ✅ 최초 예측 시간 초기화 (타이머 루프에서 predict할 때 사용)
             if self.last_predict_time is None:
-                self.last_predict_time = msg.header.stamp  # or rospy.Time.now()
+                self.last_predict_time = msg.header.stamp
+
+            # ✅ 자차 상태 추정 (속도 + 요레이트)
             nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
             if nearest_chassis_msg:
-                avg_speed_kph = (nearest_chassis_msg.whl_spd_fl + nearest_chassis_msg.whl_spd_fr +
-                                nearest_chassis_msg.whl_spd_rl + nearest_chassis_msg.whl_spd_rr) / 4.0
+                avg_speed_kph = (
+                    nearest_chassis_msg.whl_spd_fl + nearest_chassis_msg.whl_spd_fr +
+                    nearest_chassis_msg.whl_spd_rl + nearest_chassis_msg.whl_spd_rr
+                ) / 4.0
                 self.ego_vel = avg_speed_kph / 3.6
                 self.ego_yaw_rate = nearest_chassis_msg.cr_yrs_yr * np.pi / 180.0
 
@@ -1398,16 +1405,6 @@ class MCTrackTrackerNode:
             else:
                 dt = (msg.header.stamp - self.last_time_stamp).to_sec()
             self.last_time_stamp = msg.header.stamp
-
-            # if nearest_chassis_msg:
-            #     timestamp_det = msg.header.stamp.to_sec()
-            #     timestamp_ego = nearest_chassis_msg.header.stamp.to_sec()
-            #     time_diff = timestamp_det - timestamp_ego
-
-            #     rospy.loginfo(
-            #         f"[EGO] vel={self.ego_vel:.2f} m/s, yaw_rate={np.degrees(self.ego_yaw_rate):.2f} deg/s, "
-            #         f"dt={dt:.3f}s, det_ts={timestamp_det:.6f}, ego_ts={timestamp_ego:.6f}, diff={time_diff:.3f}s"
-            #     )
 
             self.frame_idx += 1
             rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
@@ -1427,13 +1424,11 @@ class MCTrackTrackerNode:
             for i, obj in enumerate(msg.objects):
                 label_str = obj.label.strip().lower()
                 label = self.LABEL_STR_TO_ID.get(label_str, -1)
-
                 if label not in VALID_CLASSES:
                     continue
                 if obj.score < class_min_confidence.get(label, 0.0):
                     continue
-
-                det = {
+                detections.append({
                     "id":         i,
                     "position":   [obj.x, obj.y, obj.z],
                     "yaw":        obj.yaw,
@@ -1441,102 +1436,73 @@ class MCTrackTrackerNode:
                     "type":       label,
                     "velocity":   [obj.vx, obj.vy],
                     "confidence": obj.score
-                }
-                detections.append(det)
+                })
 
-            # [5] Ego-motion 보상 + Kalman 예측 그리고 트래커 업데이트
+            # [5] Ego-motion 보상만 수행 (predict는 별도 루프에서 처리됨)
             if dt > 0:
                 t1 = timestamp_sec
                 t0 = t1 - dt
                 samples = self.get_chassis_samples_in_range(t0, t1)
 
                 if samples:
+                    # ✅ chassis 데이터를 기반으로 정확한 적분 방식 보상 적용
                     dx, dy, dyaw = self.integrate_ego_motion(samples, t0, t1, self.ego_yaw)
                     self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
                 else:
-                    dx = self.ego_vel * dt * np.cos(self.ego_yaw)
-                    dy = self.ego_vel * dt * np.sin(self.ego_yaw)
-                    dyaw = self.ego_yaw_rate * dt
-                    self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
-
+                    # ✅ chassis 데이터가 없으면 보상 생략 (추론 왜곡 방지)
+                    rospy.logwarn("[EgoComp] No chassis samples available — skipping ego-motion compensation")
             else:
-                rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
+                rospy.logwarn(f"Skipping ego compensation for dt={dt:.3f}s")
 
-                
+            # [6] 트래커 업데이트만 수행 (예측은 타이머 루프에서 수행됨)
             self.tracker.update(detections, dt)
 
-            # [6] 트랙 결과 변환 및 퍼블리시 메시지 생성
+            # [7] 추적 결과를 변환하여 메시지로 구성
             tracks = self.tracker.get_tracks()
             rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
 
             ta = PfGMFATrackArray(header=msg.header)
             for t in tracks:
                 m = PfGMFATrack()
-                m.pos_x          = t["x"]
-                m.pos_y          = t["y"]
-                m.yaw            = t["yaw"]
-                dims             = list(t["size"])[:3]
-                m.boundingbox    = dims + [0.0] * 5
+                m.pos_x = t["x"]
+                m.pos_y = t["y"]
+                m.yaw   = t["yaw"]
+                m.boundingbox = list(t["size"])[:3] + [0.0] * 5
                 m.confidence_ind = t["confidence"]
-                m.id             = int(t["id"])
-                m.obj_class      = t["type"]
+                m.id = int(t["id"])
+                m.obj_class = t["type"]
                 ta.tracks.append(m)
 
-            # [7] RViz 시각화를 위한 Marker 생성 및 관리
+            # [8] RViz 마커 구성 및 삭제/갱신 처리
             vis_header = Header(frame_id="lidar", stamp=msg.header.stamp)
-
-            # [7.1] 현재 존재하는 트랙 ID 확인
             current_ids = set(t["id"] for t in tracks)
-
-            # [7.2] 삭제 대상 마커 결정
             deleted_ids = getattr(self, "prev_track_ids", set()) - current_ids
-
-            # [7.3] MarkerArray 초기화
             self.marker_array = MarkerArray()
 
-            # [7.4] 삭제 마커 생성
             for tid in deleted_ids:
-                delete_marker = Marker()
-                delete_marker.header = vis_header
-                delete_marker.ns = "track_meshes"
-                delete_marker.id = tid
-                delete_marker.action = Marker.DELETE
-                self.marker_array.markers.append(delete_marker)
+                for ns, base_id in [("track_meshes", 0), ("track_ids", 1000), ("track_arrows", 2000)]:
+                    m = Marker()
+                    m.header = vis_header
+                    m.ns = ns
+                    m.id = base_id + tid
+                    m.action = Marker.DELETE
+                    self.marker_array.markers.append(m)
 
-                delete_text = Marker()
-                delete_text.header = vis_header
-                delete_text.ns = "track_ids"
-                delete_text.id = 1000 + tid
-                delete_text.action = Marker.DELETE
-                self.marker_array.markers.append(delete_text)
-
-                delete_arrow = Marker()
-                delete_arrow.header = vis_header
-                delete_arrow.ns = "track_arrows"
-                delete_arrow.id = 2000 + tid
-                delete_arrow.action = Marker.DELETE
-                self.marker_array.markers.append(delete_arrow)
-
-            # [7.5] 트랙 마커 추가
             for t in tracks:
-                marker = create_single_track_marker(t, vis_header, t["id"])
-                self.marker_array.markers.append(marker)
+                m1 = create_single_track_marker(t, vis_header, t["id"])
+                self.marker_array.markers.append(m1)
 
-                text_marker = create_text_marker(t, vis_header, 1000 + t["id"])
-                if text_marker is not None:
-                    self.marker_array.markers.append(text_marker)
+                m2 = create_text_marker(t, vis_header, 1000 + t["id"])
+                if m2 is not None:
+                    self.marker_array.markers.append(m2)
 
-                arrow_marker = create_arrow_marker(t, vis_header, 2000 + t["id"])
-                self.marker_array.markers.append(arrow_marker)
+                m3 = create_arrow_marker(t, vis_header, 2000 + t["id"])
+                self.marker_array.markers.append(m3)
 
-            # [7.6] 자차 마커 추가
             ego_marker = create_ego_marker(vis_header.stamp)
             self.marker_array.markers.append(ego_marker)
 
-            # [7.7] MarkerArray 퍼블리시
             self.vis_pub.publish(self.marker_array)
-
-            # [7.8] 이전 트랙 ID 저장
             self.prev_track_ids = current_ids
 
         except Exception as e:
