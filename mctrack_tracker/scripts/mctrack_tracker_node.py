@@ -390,7 +390,7 @@ def get_confirmed_bonus(label):
 
 
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
-def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1):
+def hungarian_iou_matching(tracks, detections, dt=0.1, use_precise_gdiou=False):
     if not tracks or not detections:
         rospy.logwarn("[Hungarian Matching] No tracks or detections available!")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
@@ -426,8 +426,24 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1):
             yaw_diff = abs(track.x[3] - det["yaw"])
             yaw_penalty = 1.0 - np.cos(yaw_diff)
 
-            ro_iou = ro_gdiou_2d(track.size[:2], det["size"][:2], track.x[3], det["yaw"])
-            iou_penalty = 1.0 - ro_iou
+            if use_precise_gdiou:
+                bbox_det = BBox(
+                    frame_id=det.get("id", -1),
+                    bbox={
+                        "category": det["type"],
+                        "detection_score": det.get("confidence", 0.5),
+                        "lwh": det["size"],
+                        "global_xyz": det["position"],
+                        "global_orientation": [0, 0, 0, 1],
+                        "global_yaw": det["yaw"],
+                        "global_velocity": det.get("velocity", [0.0, 0.0]),
+                        "global_acceleration": [0.0, 0.0],
+                    }
+                )
+                ro_iou = cal_rotation_gdiou_inbev(track, bbox_det, class_id=track.label, cal_flag="Predict")
+            else:
+                ro_iou = ro_gdiou_2d(track.size[:2], det["size"][:2], track.x[3], det["yaw"])
+            iou_penalty = 1.0 - max(ro_iou, 0.0)
 
             if track.label in [6, 7, 8]:  # 작은 객체
                 cost = 0.5 * dist + 0.3 * yaw_penalty + 0.2 * iou_penalty
@@ -992,10 +1008,9 @@ class KalmanTrackedObject:
 
 # === KalmanMultiObjectTracker (predict only) ===
 class KalmanMultiObjectTracker:
-    def __init__(self, use_hungarian=True, use_hybrid_cost=False):
+    def __init__(self, use_precise_gdiou=False):
         self.tracks = []
-        self.use_hungarian = use_hungarian
-        self.use_hybrid_cost = use_hybrid_cost
+        self.use_precise_gdiou = use_precise_gdiou 
 
     def predict(self, dt):
         for t in self.tracks:
@@ -1006,10 +1021,7 @@ class KalmanMultiObjectTracker:
             track.apply_ego_compensation(dx, dy, dyaw)
 
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
-    def _recover_obscured_tracks(self,
-                                unmatched_dets: List[int],
-                                detections: List[Dict],
-                                dt: float) -> List[int]:
+    def _recover_obscured_tracks(self, unmatched_dets: List[int], detections: List[Dict], dt: float) -> List[int]:
         used = []
 
         for di in unmatched_dets:
@@ -1036,11 +1048,25 @@ class KalmanMultiObjectTracker:
                 if dist > _get_class_distance_threshold(label):
                     continue
 
-                score = ro_gdiou_2d(track.size[:2], det['size'][:2],
-                                    track.yaw_state[0], det['yaw'])
+                # ✅ 선택적 GDIoU 계산 방식
+                if self.use_precise_gdiou:
+                    bbox_det = BBox(frame_id=det.get("id", -1), bbox={
+                        "category": det["type"],
+                        "detection_score": det.get("confidence", 0.5),
+                        "lwh": det["size"],
+                        "global_xyz": det["position"],
+                        "global_orientation": [0, 0, 0, 1],
+                        "global_yaw": det["yaw"],
+                        "global_velocity": det.get("velocity", [0.0, 0.0]),
+                        "global_acceleration": [0.0, 0.0],
+                    })
+                    score = cal_rotation_gdiou_inbev(track, bbox_det, class_id=label, cal_flag="BackPredict")
+                else:
+                    score = ro_gdiou_2d(track.size[:2], det['size'][:2],
+                                        track.yaw_state[0], det['yaw'])
+
                 cost = dist + (1.0 - score)
 
-                # ✅ 완화 조건 (score < 0.5 허용 가능, 단 너무 멀면 제외)
                 if score < 0.5 and cost > 1.5:
                     continue
 
@@ -1054,8 +1080,6 @@ class KalmanMultiObjectTracker:
                 best_track.update(det, dt)
                 best_track.hits += 1
                 used.append(di)
-                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[RECOVER] ID={best_track.id} ← D#{di}, score={best_score:.3f}\n")
 
         return used
 
@@ -1069,9 +1093,14 @@ class KalmanMultiObjectTracker:
         matched_ids = set()
 
         # 1) Matching using Hungarian algorithm
-        if self.use_hungarian and self.tracks and detections:
+        if self.tracks and detections:
             _, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
-                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost, dt=dt)
+                hungarian_iou_matching(
+                    self.tracks,
+                    detections,
+                    dt=dt,
+                    use_precise_gdiou=self.use_precise_gdiou
+                )
             for tr, det in zip(matched_trks, matched_dets):
                 tr.update(det, dt)
                 matched_ids.add(tr.id)
@@ -1203,10 +1232,8 @@ class MCTrackTrackerNode:
         self.prev_track_ids  = set()
 
         # 4) Kalman 트래커 초기화
-        use_hybrid = True
         self.tracker = KalmanMultiObjectTracker(
-            use_hungarian=True,
-            use_hybrid_cost=use_hybrid
+            use_precise_gdiou=False  # ✅ 여기서 토글
         )
 
         # 5) 퍼블리셔 생성 & 구독자 연결 대기
