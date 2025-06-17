@@ -869,7 +869,7 @@ class KalmanTrackedObject:
         # self.yaw_state[1] = 0.0
         # self.yaw_P = np.eye(2) * 1e-2
 
-        # === Yaw 제한 보정 with 튐 누적 보완 + 속도 기반 억제 ===
+        # === Yaw 제한 보정 with 튐 누적 보완 + 속도 기반 완화 ===
         def normalize_angle(angle):
             return (angle + np.pi) % (2 * np.pi) - np.pi
 
@@ -883,20 +883,29 @@ class KalmanTrackedObject:
         v = np.linalg.norm(self.pose_state[2:4])
         yaw_drift = abs(mean_drift)
 
-        if yaw_drift > np.radians(3):  # 회전 감지 (디텍션 기반이긴 하지만 방향성 충분)
-            coeff = 0.3
-        elif v < 0.3:
-            coeff = 0.1
+        # === 조건별 보정 계수 설정
+        if v < 0.2:
+            coeff = 0.4  # 정지 시에도 빠르게 보정
         elif v < 1.0:
-            coeff = 0.2
+            coeff = 0.3
         else:
-            coeff = 0.4
-        if abs(mean_drift) < 0.5:
+            coeff = 0.2 if yaw_drift < np.radians(3) else 0.4
+
+        # === 보정 적용
+        if yaw_drift > np.radians(15):
+            # 🎯 너무 큰 튐은 detection 덮어쓰기
+            self.yaw_state[0] = yaw_det
+            self.yaw_state[1] = 0.0
+            self.yaw_P = np.eye(2) * 1e-2
+            self.yaw_drift_buffer.clear()
+        elif abs(mean_drift) < 0.5:
+            # 🔄 점진적 Kalman-like 보정
             self.yaw_state[0] += coeff * mean_drift
             self.yaw_state[0] = normalize_angle(self.yaw_state[0])
             self.yaw_state[1] = 0.0
             self.yaw_P = np.eye(2) * 1e-2
         elif len(self.yaw_drift_buffer) == 5 and all(abs(d) > 0.5 for d in self.yaw_drift_buffer):
+            # 🧠 반복적으로 틀리면 강제 덮어쓰기
             self.yaw_state[0] = yaw_det
             self.yaw_state[1] = 0.0
             self.yaw_P = np.eye(2) * 1e-2
@@ -1357,12 +1366,6 @@ class MCTrackTrackerNode:
 
         if dt <= 0:
             return
-
-        dx = self.ego_vel * dt * np.cos(self.ego_yaw)
-        dy = self.ego_vel * dt * np.sin(self.ego_yaw)
-        dyaw = self.ego_yaw_rate * dt
-
-        self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
         self.tracker.predict(dt)
 
     def delete_all_markers(self):
@@ -1417,7 +1420,7 @@ class MCTrackTrackerNode:
             # [4] Detection 메시지 → 내부 dict 포맷으로 변환 + 필터링
             VALID_CLASSES = set(CLASS_CONFIG.keys())
             class_min_confidence = {
-                1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.02,
+                1: 0.03, 2: 0.04, 3: 0.03, 4: 0.03, 5: 0.02,
                 6: 0.08, 7: 0.02, 8: 0.02, 9: 0.02, 10: 0.01
             }
             detections = []
