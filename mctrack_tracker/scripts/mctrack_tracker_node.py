@@ -125,17 +125,40 @@ def cal_rotation_iou_inbev(pose1, pose2):
     return iou, union
 
 def get_class_weights(class_id):
+    """
+    클래스별 Hybrid Cost 계산 시 사용하는 GDIoU 중심 가중치
+    - 반환값: (area_penalty_weight, center_dist_weight)
+    """
     weights = {
         1: (0.5, 1.5),  # car
-        6: (1.0, 1.0),  # pedestrian (✓ keep)
-        8: (1.0, 1.0),  # bicycle     ← 강화
-        7: (1.0, 1.0),  # motorcycle  ← 강화
-        3: (0.6, 0.4),  # bus         (✓ keep)
-        4: (1.0, 1.0),  # trailer
         2: (1.0, 1.0),  # truck
+        3: (0.6, 0.4),  # bus
+        4: (1.0, 1.0),  # trailer
+        6: (1.0, 1.0),  # pedestrian
+        7: (1.0, 1.0),  # motorcycle
+        8: (1.0, 1.0),  # bicycle
+        # 필요 시 다른 클래스 추가
     }
-    return weights.get(class_id, (0.7, 0.3))
+    return weights.get(class_id, (0.7, 0.3))  # default weight
 
+def get_confidence_weights(class_id):
+    """
+    클래스별 confidence blending 가중치
+    - 반환값: (det_score_weight, pred_score_weight)
+    """
+    weights = {
+        1:  (0.5, 0.5),  # car
+        2:  (0.5, 0.5),  # truck
+        3:  (0.5, 0.5),  # bus
+        4:  (0.6, 0.4),  # trailer
+        5:  (0.6, 0.4),  # construction vehicle
+        6:  (0.6, 0.4),  # pedestrian
+        7:  (0.5, 0.5),  # motorcycle
+        8:  (0.6, 0.4),  # bicycle
+        9:  (0.8, 0.2),  # barrier
+        10: (0.8, 0.2),  # traffic cone
+    }
+    return weights.get(class_id, (0.5, 0.5))
 
 # === Utility Functions ===
 
@@ -321,20 +344,6 @@ def cal_rotation_gdiou_inbev(box_trk, box_det, class_id, cal_flag=None):
     return ro_gdiou
 
 
-
-def bbox_iou_2d(bbox1, bbox2):
-    if not bbox1 or not bbox2:
-        return 0.0
-    x1 = max(bbox1[0], bbox2[0])
-    y1 = max(bbox1[1], bbox2[1])
-    x2 = min(bbox1[2], bbox2[2])
-    y2 = min(bbox1[3], bbox2[3])
-    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
-    area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
-    union = area1 + area2 - inter_area
-    return inter_area / union if union > 0 else 0.0
-
 def ro_gdiou_2d(box1, box2, yaw1, yaw2):
     """
     MCTrack에서 사용하는 yaw-penalized IoU 유사 함수
@@ -381,7 +390,7 @@ def get_confirmed_bonus(label):
 
 
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
-def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, ego_vel=0.0, ego_yaw=0.0):
+def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1):
     if not tracks or not detections:
         rospy.logwarn("[Hungarian Matching] No tracks or detections available!")
         return [], list(range(len(detections))), list(range(len(tracks))), [], []
@@ -474,7 +483,6 @@ def hungarian_iou_matching(tracks, detections, use_hybrid_cost=False, dt=0.1, eg
         cost = cost_matrix[i, j]
         label = tracks[i].label
         threshold = cost_thresholds.get(label, default_threshold)
-        ro_iou = ro_gdiou_2d(tracks[i].size[:2], detections[j]["size"][:2], tracks[i].x[3], detections[j]["yaw"])
 
         if cost < threshold:
             matches.append((i, j))
@@ -507,7 +515,7 @@ class TrackState:
     INITIALIZATION = 0
     CONFIRMED = 1
     OBSCURED = 2
-    DEAD = 4
+    DEAD = 3
 
 CLASS_NAME_MAP = {
     1: "car", 6: "pedestrian", 8: "bicycle", 7: "motorcycle", 3: "bus",
@@ -519,6 +527,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 25,
+        'max_predict_time': 2.5, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -537,6 +546,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,                 # 기존 1
         'max_unmatch': 4,                       # 기존 1
         'max_predict_len': 25,                  # 기존 7 * 2.8
+        'max_predict_time': 2.5, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -555,6 +565,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 25,
+        'max_predict_time': 2.5, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -573,6 +584,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 4,
         'max_predict_len': 30,
+        'max_predict_time': 3.0, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -591,6 +603,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 28,
+        'max_predict_time': 2.8, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -609,6 +622,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 20,
+        'max_predict_time': 2.0, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -627,6 +641,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 30,
+        'max_predict_time': 3.0, 
         'confirmed_det_score': 0.7,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -645,6 +660,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 15,
+        'max_predict_time': 1.5, 
         'confirmed_det_score': 0.5,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -663,6 +679,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 15,
+        'max_predict_time': 1.5, 
         'confirmed_det_score': 0.5,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -681,6 +698,7 @@ CLASS_CONFIG = {
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 20,
+        'max_predict_time': 2.0, 
         'confirmed_det_score': 0.5,
         'confirmed_match_score': 0.3,
         'is_filter_predict_box': -1,
@@ -704,13 +722,14 @@ class KalmanTrackedObject:
         self.label = detection['type']
         wlh = detection.get('size', [1.0, 1.0, 1.0])
         self.traj_length = 1
-        self.use_smoothing = False  
         self.status_flag = TrackState.INITIALIZATION 
         self.hits = 1
         self.yaw_drift_buffer = deque(maxlen=5)
         px, py = detection['position'][:2]
         vx, vy = detection.get("velocity", [0.0, 0.0])
         self.pose_state = np.array([px, py, vx, vy])
+        self.confidence = 0.0
+        self.time_since_update = 0.0
 
         class_cfg = CLASS_CONFIG.get(self.label)
         if class_cfg is not None:
@@ -745,28 +764,10 @@ class KalmanTrackedObject:
         self.size_state = np.array(wlh[:3])
         self.age = 0.0
         self.missed_count = 0
-        self.soft_deleted = False
         self.bboxes = []
 
-    def predict(self, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
-        # === [1] Ego-motion Compensation ===
-        if ego_vel > 0.01 or abs(ego_yaw_rate) > 0.01:
-            dx = ego_vel * dt * np.cos(ego_yaw)
-            dy = ego_vel * dt * np.sin(ego_yaw)
-            dyaw = ego_yaw_rate * dt
-
-            cos_yaw = np.cos(-dyaw)
-            sin_yaw = np.sin(-dyaw)
-
-            rel_x = self.pose_state[0]
-            rel_y = self.pose_state[1]
-
-            self.pose_state[0] = cos_yaw * rel_x - sin_yaw * rel_y - dx
-            self.pose_state[1] = sin_yaw * rel_x + cos_yaw * rel_y - dy
-            self.yaw_state[0] -= dyaw
-            self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
-
-        # === [2] Kalman Prediction (only if no detection) ===
+    def predict(self, dt):
+        # === Kalman Prediction (pose, velocity, yaw, size) ===
         F = np.eye(4)
         F[0, 2] = dt
         F[1, 3] = dt
@@ -785,14 +786,15 @@ class KalmanTrackedObject:
         self.size_P = self.size_P + self.size_Q
 
         self.age += dt
-        # self.missed_count += 1
+        self.time_since_update += dt
 
-        confidence = max(0.0, min(1.0, self.tracking_score()))
+        self.confidence = self.tracking_score()
+
 
         pred_dict = {
             "frame_id": -1,
             "category": self.label,
-            "detection_score": confidence,
+            "detection_score": self.confidence,
             "lwh": self.size.tolist(),
             "global_xyz": self.pose_state[:2].tolist() + [self.bboxes[-1].global_xyz[2] if self.bboxes else 0.0],
             "global_orientation": [0, 0, 0, 1],
@@ -815,18 +817,17 @@ class KalmanTrackedObject:
         if self.status_flag == TrackState.OBSCURED and self.missed_count > (
             self.max_missed + CLASS_CONFIG[self.label]["max_predict_len"]
         ):
-            # ✅ 삭제 보류 조건: traj_len > 10, confidence > 0.6
-            if self.traj_length > 10 and getattr(self, 'confidence', 0.5) > 0.6:
-                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[삭제 보류] ID={self.id}, missed={self.missed_count}, traj_len={self.traj_length}, conf={self.confidence:.2f}\n")
-                return  # 아직 삭제 안 함
+            # === 클래스 설정 기반 삭제 유예 범위 계산 ===
+            base_time = CLASS_CONFIG[self.label].get("max_predict_time", 2.5)
+            max_extension = min(base_time * 1.5, 3.0)  # 최대 3초까지만 보류
+            threshold = base_time + max_extension
 
-            # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-            #     f.write(f"[STATE_CHANGE] ID={self.id} OBSCURED → DEAD | missed={self.missed_count}, max_predict_len={CLASS_CONFIG[self.label]['max_predict_len']}\n")
+            if self.traj_length > 10 and getattr(self, 'confidence', 0.5) > 0.6 and self.time_since_update < threshold:
+                return
+
             self.status_flag = TrackState.DEAD
 
-
-    def update(self, detection, dt, matched_score):
+    def update(self, detection, dt):
         pos = detection['position']
         vel = detection.get('velocity', [0.0, 0.0])
 
@@ -921,11 +922,15 @@ class KalmanTrackedObject:
         self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P + self.size_Q
 
         # ✅ 기타 상태 업데이트
-        self.soft_deleted = False
         self.missed_count = 0
         self.hits += 1
+        self.time_since_update = 0.0
         self.traj_length += 1
-        self.confidence = detection.get("confidence", 0.5)
+        det_score = detection.get("confidence", 0.5)
+        pred_score = self.tracking_score()
+
+        alpha, beta = get_confidence_weights(self.label)
+        self.confidence = alpha * det_score + beta * pred_score
 
         if self.traj_length > self.confirm_threshold or (
             self.confidence > CLASS_CONFIG[self.label]["confirmed_det_score"] and
@@ -947,13 +952,6 @@ class KalmanTrackedObject:
         self.bboxes.append(new_bbox)
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
-
-        # update_log = (
-        #     f"[UPDATE] ID={self.id}, hits={self.hits}, traj_len={self.traj_length}, "
-        #     f"status={self.status_flag}, soft_deleted={self.soft_deleted}, missed={self.missed_count}"
-        # )
-        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #     f.write(update_log + "\n")
 
     def tracking_score(self):
         vel = np.hypot(self.pose_state[2], self.pose_state[3])
@@ -999,24 +997,21 @@ class KalmanMultiObjectTracker:
         self.use_hungarian = use_hungarian
         self.use_hybrid_cost = use_hybrid_cost
 
-    def predict(self, dt, ego_vel, ego_yaw_rate, ego_yaw):
+    def predict(self, dt):
         for t in self.tracks:
-            t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
+            t.predict(dt)
     
     def apply_ego_compensation_to_all(self, dx, dy, dyaw):
         for track in self.tracks:
             track.apply_ego_compensation(dx, dy, dyaw)
 
-    def predict_all(self, dt):
-        for track in self.tracks:
-            track.predict(dt)
-
     # === Modify Soft-deleted ReID with reproj_bbox filtering ===
-    def _reid_soft_deleted_tracks(self,
+    def _recover_obscured_tracks(self,
                                 unmatched_dets: List[int],
                                 detections: List[Dict],
                                 dt: float) -> List[int]:
         used = []
+
         for di in unmatched_dets:
             det = detections[di]
             label = det['type']
@@ -1024,31 +1019,29 @@ class KalmanMultiObjectTracker:
             if label not in CLASS_CONFIG:
                 continue
 
-            best_score = 0.0
             best_track = None
+            best_score = -1e9
+
             for track in self.tracks:
-                if track.label not in CLASS_CONFIG:
-                    continue
-                if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
-                    continue
-                if not getattr(track, 'soft_deleted', False):
-                    continue
                 if track.label != label:
+                    continue
+                if track.status_flag != TrackState.OBSCURED:
+                    continue
+                if track.traj_length > CLASS_CONFIG[label]["max_predict_len"]:
                     continue
 
                 dx = track.pose_state[0] - det["position"][0]
                 dy = track.pose_state[1] - det["position"][1]
-                if np.hypot(dx, dy) > _get_class_distance_threshold(label):
+                dist = np.hypot(dx, dy)
+                if dist > _get_class_distance_threshold(label):
                     continue
 
                 score = ro_gdiou_2d(track.size[:2], det['size'][:2],
                                     track.yaw_state[0], det['yaw'])
+                cost = dist + (1.0 - score)
 
-
-                if score <= 0.5:
-                    # 완화, 다만 낮으면 경고
-                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    #     f.write(f"[REID WARN] ID={track.id} low GDIoU: {score:.3f}\n")
+                # ✅ 완화 조건 (score < 0.5 허용 가능, 단 너무 멀면 제외)
+                if score < 0.5 and cost > 1.5:
                     continue
 
                 if score > best_score:
@@ -1056,201 +1049,84 @@ class KalmanMultiObjectTracker:
                     best_track = track
 
             if best_track is not None:
-                best_track.soft_deleted = False
+                best_track.status_flag = TrackState.CONFIRMED
                 confidence = det.get("confidence", 0.5)
-                best_track.update(det, dt, matched_score=confidence)
+                best_track.update(det, dt)
                 best_track.hits += 1
                 used.append(di)
                 # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[REID SUCCESS] ID={best_track.id} with det ID={di}, score={best_score:.3f}\n")
+                #     f.write(f"[RECOVER] ID={best_track.id} ← D#{di}, score={best_score:.3f}\n")
 
         return used
 
-
-    def _fallback_match(self,
-                        unmatched_trks: List[int],
-                        unmatched_dets: List[int],
-                        detections: List[Dict],
-                        dt: float) -> List[int]:
-        used = []
-        for ti in unmatched_trks:
-            track = self.tracks[ti]
-
-            # ✅ 조건 1: CLASS 체크 + 너무 긴 트랙 무시
-            if track.label not in CLASS_CONFIG:
-                continue
-            if track.traj_length > CLASS_CONFIG[track.label]["max_predict_len"]:
-                continue
-
-            # ✅ 조건 2: CONFIRMED 트랙은 fallback 금지 (Hungarian에서 책임져야 함)
-            if track.status_flag == TrackState.CONFIRMED:
-                continue
-
-            # ✅ 조건 3: 트랙 길이가 너무 짧거나, missed가 없는 경우 무시
-            if track.label in [6, 7, 8]:  # 소형 객체
-                if track.traj_length < 2 or track.missed_count == 0:
-                    continue
-            else:
-                if track.traj_length < 3 or track.missed_count == 0:
-                    continue
-
-            best_cost = float("inf")
-            best_det = -1
-
-            for di in unmatched_dets:
-                if di in used:
-                    continue
-                det = detections[di]
-                if det['type'] != track.label:
-                    continue
-
-                dx = track.pose_state[0] - det["position"][0]
-                dy = track.pose_state[1] - det["position"][1]
-                dist = np.hypot(dx, dy)
-                if dist > _get_class_distance_threshold(track.label):
-                    continue
-
-                score = ro_gdiou_2d(track.size[:2], det['size'][:2],
-                                    track.yaw_state[0], det['yaw'])
-
-                cost = dist + (1.0 - score)
-
-                # ✅ 조건 4: GDIoU score 기준 강화
-                if score < 0.7:
-                    continue
-
-                if cost < 1.2 and cost < best_cost:
-                    best_cost = cost
-                    best_det = di
-
-            if best_det >= 0:
-                matched_det = detections[best_det]
-                confidence = matched_det.get("confidence", 0.5)
-                self.tracks[ti].update(matched_det, dt, matched_score=confidence)
-                used.append(best_det)
-            # else:
-            #     if track.label in [6, 7, 8]:  # 소형 객체만 추가 로깅
-            #         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-            #             f.write(
-            #                 f"[FALLBACK FAIL][CLS={track.label}] T#{ti} ID={track.id} "
-            #                 f"traj_len={track.traj_length}, missed={track.missed_count}, "
-            #                 f"status={track.status_flag} → no match among {len(unmatched_dets)} dets\n"
-            #             )
-        return used
-    def update(self, detections, dt, ego_vel=0.0, ego_yaw_rate=0.0, ego_yaw=0.0):
-        matched_tracks = []
-        matched_dets = []
-        # 0) predict
+    def update(self, detections, dt):
+        # 0) Predict step for all existing tracks
         for t in self.tracks:
-            t.predict(dt, ego_vel, ego_yaw_rate, ego_yaw)
+            t.predict(dt)
 
-        # prepare unmatched lists
         unmatched_dets = list(range(len(detections)))
         unmatched_trks = list(range(len(self.tracks)))
+        matched_ids = set()
 
-        # 1) Standard Hungarian matching
+        # 1) Matching using Hungarian algorithm
         if self.use_hungarian and self.tracks and detections:
-            matches_h, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
-                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost,
-                                    dt=dt, ego_vel=ego_vel, ego_yaw=ego_yaw)
+            _, unmatched_dets, unmatched_trks, matched_trks, matched_dets = \
+                hungarian_iou_matching(self.tracks, detections, self.use_hybrid_cost, dt=dt)
             for tr, det in zip(matched_trks, matched_dets):
-                tr.update(det, dt, matched_score=det.get("confidence", 0.5))
+                tr.update(det, dt)
+                matched_ids.add(tr.id)
 
+        # 2) OBSCURED 처리: 짧은 트랙이 unmatch된 경우
         for ti in unmatched_trks:
             track = self.tracks[ti]
             if track.traj_length <= 1 and track.missed_count > 0:
-                track.soft_deleted = True
-                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[DELETE EARLY] ID={track.id} traj_len={track.traj_length}, missed={track.missed_count} → soft_deleted\n")
+                track.status_flag = TrackState.OBSCURED
 
-        # 3) Fallback matching
-        if unmatched_trks and unmatched_dets:
-            used_f = self._fallback_match(unmatched_trks, unmatched_dets, detections, dt)
-            # 여기서 used_f 에 포함된 det 인덱스는 이미 트랙이 업데이트됐으므로
-            # unmatched_dets 에서 제거해야 합니다.
-            unmatched_dets = [d for d in unmatched_dets if d not in used_f]
-        
-        # 4) Re-ID of soft-deleted tracks (conservative)
-        if unmatched_dets:
-            used_r = self._reid_soft_deleted_tracks(unmatched_dets, detections, dt)
-            unmatched_dets = [d for d in unmatched_dets if d not in used_r]
-        
-        # 5) New track 생성 (중복 방지 필터 포함)
-        num_new_tracks = 0
+        # 3~4) ReID로 OBSCURED 트랙 복구
+        used_r = self._recover_obscured_tracks(unmatched_dets, detections, dt)
+        unmatched_dets = [d for d in unmatched_dets if d not in used_r]
+
+        # 5) 새로운 트랙 생성 (중복 방지 포함)
         for di in unmatched_dets:
             det = detections[di]
-
-            # 💡 트랙 생성 전에 중복 체크
             is_duplicate = False
             for t in self.tracks:
                 if t.label != det["type"]:
                     continue
-                if t.status_flag != TrackState.CONFIRMED:
+                if t.status_flag not in [TrackState.CONFIRMED, TrackState.OBSCURED]:
                     continue
                 dist = np.linalg.norm(t.x[:2] - det["position"][:2])
                 if dist > 1.5:
                     continue
                 score = ro_gdiou_2d(t.size[:2], det['size'][:2], t.x[3], det['yaw'])
-                if score > 0.7:  # 🎯 유사한 트랙 존재
+                if score > 0.7:
                     is_duplicate = True
                     break
-            if is_duplicate:
-                continue  # 새 트랙 생성하지 않음
+            if not is_duplicate:
+                self.tracks.append(KalmanTrackedObject(det))
 
-            new_track = KalmanTrackedObject(det)
-            self.tracks.append(new_track)
-            num_new_tracks += 1
-
-        # if num_new_tracks >= 10:
-        #     with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #         f.write(f"[WARNING] {num_new_tracks} new tracks created in one frame!\n")
-                
-        # ✅ 6) missed_count 증가 먼저
-        matched_track_ids = set(t.id for t in matched_tracks)
+        # 6) 매칭되지 않은 트랙은 missed_count 증가
         for t in self.tracks:
-            if t.id not in matched_track_ids:
+            if t.id not in matched_ids:
                 t.missed_count += 1
-                # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                #     f.write(f"[MISSED_INC] ID={t.id}, missed_count={t.missed_count}\n")
 
-        # ✅ 7) Soft-delete vs Hard-delete 판단 (missed_count 증가 반영됨)
+        # 7) Soft-delete 및 삭제 조건 판단
         MAX_EXTRA_MISSES_FOR_DELETE = 10
         for t in self.tracks:
             if t.status_flag == TrackState.CONFIRMED:
                 if t.missed_count > t.max_missed + MAX_EXTRA_MISSES_FOR_DELETE:
-                    t.soft_deleted = True
-                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    #     f.write(f"[SOFT_DELETE] ID={t.id}, status=CONFIRMED, missed={t.missed_count}, allowed={t.max_missed + 5}\n")
+                    t.status_flag = TrackState.OBSCURED
             else:
                 if t.missed_count > t.max_missed:
-                    t.soft_deleted = True
-                    # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-                    #     f.write(f"[SOFT_DELETE] ID={t.id}, status={t.status_flag}, missed={t.missed_count}, allowed={t.max_missed}\n")
+                    t.status_flag = TrackState.OBSCURED
 
-
-        # # 8) 삭제 직전 로깅
-        # for t in self.tracks:
-        #     if t.soft_deleted and t.missed_count > t.max_missed + 10:
-        #         with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #             f.write(f"[DELETE] ID={t.id} deleted | missed={t.missed_count}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
-
-        # 9) 실제 제거
+        # 9) 오래된 OBSCURED 트랙 제거
         self.tracks = [
             t for t in self.tracks
-            if not (t.soft_deleted and t.missed_count > t.max_missed + 3)
+            if not (t.status_flag == TrackState.OBSCURED and t.time_since_update > 5.0)
         ]
 
-
-        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #     for t in self.tracks:
-        #         f.write(f"[STATE] ID={t.id}, cls={t.label}, hits={t.hits}, missed={t.missed_count}, traj_len={t.traj_length}, soft_deleted={t.soft_deleted}, status={t.status_flag}\n")
-        # === 💬 CONFIRMED 상태의 차량 트랙 수 기록 ===
-        confirmed_car_tracks = [t for t in self.tracks if t.label == 1 and t.status_flag == TrackState.CONFIRMED]
-        # track_stat_log = f"[STATS] Confirmed car tracks = {len(confirmed_car_tracks)}"
-        # with open("/tmp/mctrack_cost_debug.txt", "a") as f:
-        #     f.write(track_stat_log + "\n")
-
-        # 기존 출력 (필요시 유지)
+        # 상태 출력
         rospy.loginfo(f"[Tracker] Total Tracks: {len(self.tracks)}")
 
     def get_tracks(self):
@@ -1265,7 +1141,7 @@ class KalmanMultiObjectTracker:
                 continue
             if t.status_flag != TrackState.CONFIRMED:
                 continue
-            if getattr(t, 'soft_deleted', False):
+            if t.status_flag == TrackState.OBSCURED:
                 continue
             if getattr(t, 'traj_length', 0) < 1:
                 continue
@@ -1332,7 +1208,6 @@ class MCTrackTrackerNode:
             use_hungarian=True,
             use_hybrid_cost=use_hybrid
         )
-        self.tracker.use_confidence_filtering = True
 
         # 5) 퍼블리셔 생성 & 구독자 연결 대기
         self.tracking_pub = rospy.Publisher("/tracking/objects",
@@ -1359,6 +1234,8 @@ class MCTrackTrackerNode:
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
 
+        self.predict_timer = rospy.Timer(rospy.Duration(0.05), self.tracker_loop)  # 20Hz 루프 추가
+
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
     def chassis_callback(self, msg):
@@ -1371,6 +1248,47 @@ class MCTrackTrackerNode:
         times = [abs(t - target_stamp) for (t, _) in self.chassis_buffer]
         nearest_idx = int(np.argmin(times))
         return self.chassis_buffer[nearest_idx][1]
+
+    def get_chassis_samples_in_range(self, t0: float, t1: float):
+        return [
+            msg for (ts, msg) in self.chassis_buffer
+            if t0 <= ts <= t1
+        ]    
+
+    def integrate_ego_motion(self, samples, t0, t1, initial_yaw):
+        dx_total, dy_total, dyaw_total = 0.0, 0.0, 0.0
+        last_time = t0
+        yaw = initial_yaw
+
+        rear_axle_offset = 1.4 # ✅ 차량 중심에서 뒤차축까지의 거리 (차량마다 다름)
+
+        for msg in samples:
+            curr_time = msg.header.stamp.to_sec()
+            dt = curr_time - last_time
+            if dt <= 0:
+                continue
+
+            avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr +
+                            msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
+            vel = avg_speed_kph / 3.6
+            yaw_rate = msg.cr_yrs_yr * np.pi / 180.0
+
+            # ✅ rear axle 기준으로 속도 보정
+            v_rear = vel - yaw_rate * rear_axle_offset
+
+            dx = v_rear * dt * np.cos(yaw)
+            dy = v_rear * dt * np.sin(yaw)
+            dyaw = yaw_rate * dt
+
+            dx_total += dx
+            dy_total += dy
+            dyaw_total += dyaw
+            yaw += dyaw
+
+            last_time = curr_time
+
+        return dx_total, dy_total, dyaw_total
+    
 
     def visualization_timer_callback(self, event):
         # 10Hz 주기로 마커 퍼블리시만 담당
@@ -1418,7 +1336,7 @@ class MCTrackTrackerNode:
         dyaw = self.ego_yaw_rate * dt
 
         self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
-        self.tracker.predict_all(dt)
+        self.tracker.predict(dt)
 
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
@@ -1434,6 +1352,9 @@ class MCTrackTrackerNode:
         try:
             # [1] 타임스탬프 계산 및 자차 상태 추정
             timestamp_sec = msg.header.stamp.to_sec()
+            # ✅ 최초 예측 시간 초기화
+            if self.last_predict_time is None:
+                self.last_predict_time = msg.header.stamp  # or rospy.Time.now()
             nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
             if nearest_chassis_msg:
                 avg_speed_kph = (nearest_chassis_msg.whl_spd_fl + nearest_chassis_msg.whl_spd_fr +
@@ -1495,12 +1416,19 @@ class MCTrackTrackerNode:
 
             # [5] Ego-motion 보상 + Kalman 예측 그리고 트래커 업데이트
             if dt > 0:
-                dx = self.ego_vel * dt * np.cos(self.ego_yaw)
-                dy = self.ego_vel * dt * np.sin(self.ego_yaw)
-                dyaw = self.ego_yaw_rate * dt
+                t1 = timestamp_sec
+                t0 = t1 - dt
+                samples = self.get_chassis_samples_in_range(t0, t1)
 
-                self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
-                self.tracker.predict_all(dt)
+                if samples:
+                    dx, dy, dyaw = self.integrate_ego_motion(samples, t0, t1, self.ego_yaw)
+                    self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
+                else:
+                    dx = self.ego_vel * dt * np.cos(self.ego_yaw)
+                    dy = self.ego_vel * dt * np.sin(self.ego_yaw)
+                    dyaw = self.ego_yaw_rate * dt
+                    self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
+
             else:
                 rospy.logwarn(f"Skipping KF predict/update for dt={dt:.3f}s")
 
