@@ -1474,7 +1474,7 @@ class MCTrackTrackerNode:
                 ta.tracks.append(m)
 
             # [8] RViz 마커 구성 및 삭제/갱신 처리
-            vis_header = Header(frame_id="lidar", stamp=msg.header.stamp)
+            vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
             current_ids = set(t["id"] for t in tracks)
             deleted_ids = getattr(self, "prev_track_ids", set()) - current_ids
             self.marker_array = MarkerArray()
