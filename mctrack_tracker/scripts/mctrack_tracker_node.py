@@ -30,6 +30,7 @@ from lidar_processing_msgs.msg import LidarPerceptionOutput, LidarObject
 from lidar_processing_msgs.msg import PfGMFATrack, PfGMFATrackArray
 from vdcl_fusion_perception.msg import DetectionObjects
 from chassis_msgs.msg import Chassis
+from collections import defaultdict
 
 # === BBox 클래스 (bbox.py 내용 통합) ===
 class BBox:
@@ -229,7 +230,7 @@ def create_single_track_marker(track, header, marker_id):
     m.color.a = min(track["confidence"] * 5, 1.0)
     m.lifetime = rospy.Duration(0.0)
     m.color.r = 0.0
-    m.color.g = 0.3
+    m.color.g = 0.2
     m.color.b = 1.0
 
     class_mesh_paths = {
@@ -248,9 +249,9 @@ def create_single_track_marker(track, header, marker_id):
     return m
 
 def create_text_marker(track, header, marker_id):
-    # 🎯 특정 클래스는 ID 마커 생략
-    if track["type"] in [9, 10]:  # 9: barrier, 10: traffic cone
-        return None
+    # # 🎯 특정 클래스는 ID 마커 생략
+    # if track["type"] in [9, 10]:  # 9: barrier, 10: traffic cone
+    #     return None
     t_m = Marker()
     t_m.header = header
     t_m.ns = "track_ids"
@@ -281,15 +282,18 @@ def create_arrow_marker(track, header, marker_id):
     arrow.scale.x = 0.2
     arrow.scale.y = 0.5
     arrow.scale.z = 0.3
-    arrow.color.a = 1.0 if speed > 0.1 else 0.0
     arrow.color.r = 1.0
     arrow.color.g = 1.0
     arrow.color.b = 1.0
 
+    STATIC_CLASSES = {9, 10}  # barrier, traffic cone
+    if track["type"] in STATIC_CLASSES:
+        arrow.color.a = 0.0
+    else:
+        arrow.color.a = 1.0 if speed > 0.1 else 0.0
+
     z_base = track["position"][2]
     z_center = z_base + track["size"][2] / 2.0
-    if track["type"] == 3:  # 🟡 bus
-        z_center += 5.0
 
     arrow.points.append(Point(x=track["x"], y=track["y"], z=z_center))
     arrow.points.append(Point(x=track["x"] + vx, y=track["y"] + vy, z=z_center))
@@ -388,6 +392,19 @@ def get_confirmed_bonus(label):
     else:
         return 0.8
 
+# 유사 클래스 그룹 정의
+SIMILAR_CLASS_GROUPS = [
+    {2, 3, 4, 5},  # truck, bus, trailer, construction_vehicle
+    {6},     # pedestrian
+    {1, 7, 8},           # car, motorcycle, bicycle
+    {9, 10},       # barrier, cone
+]
+
+def get_class_group(class_id):
+    for group in SIMILAR_CLASS_GROUPS:
+        if class_id in group:
+            return group
+    return None
 
 # === Hungarian IoU Matching Function with predicted boxes and distance-based cost ===
 def hungarian_iou_matching(tracks, detections, dt=0.1, use_precise_gdiou=False):
@@ -416,8 +433,21 @@ def hungarian_iou_matching(tracks, detections, dt=0.1, use_precise_gdiou=False):
 
     for i, track in enumerate(tracks):
         for j, det in enumerate(detections):
-            if det["type"] != track.label:
+            # === 유사 클래스 그룹 기반 penalty 적용
+            group_track = get_class_group(track.label)
+            group_det = get_class_group(det["type"])
+
+            # ✅ 모든 상태에서 그룹이 다르면 무조건 매칭 금지
+            if group_track != group_det:
+                cost_matrix[i, j] = 1e6
                 continue
+                    
+            if group_track != group_det:
+                class_penalty = 1.0  # 그룹이 완전히 다르면 강한 penalty
+            elif track.label != det["type"]:
+                class_penalty = 0.2  # 같은 그룹 내에서 class가 다르면 약한 penalty
+            else:
+                class_penalty = 0.0  # 완전히 동일하면 penalty 없음
 
             pos_track = track.x[:2]
             pos_det = np.array(det["position"][:2])
@@ -449,6 +479,9 @@ def hungarian_iou_matching(tracks, detections, dt=0.1, use_precise_gdiou=False):
                 cost = 0.5 * dist + 0.3 * yaw_penalty + 0.2 * iou_penalty
             else:
                 cost = 0.4 * dist + 0.3 * yaw_penalty + 0.3 * iou_penalty
+
+            cost += class_penalty  # ✅ 클래스 차이에 대한 패널티 추가
+
             # if track.label in [6, 7, 8]:
             #     with open("/tmp/mctrack_cost_debug.txt", "a") as f:
             #         f.write(
@@ -554,9 +587,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 3.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),      # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 0.1,               # 관측 신뢰도 높임 → detection을 적극 반영
     },
     6: {  # pedestrian
         'confirm_threshold': 2,                 # 기존 1
@@ -573,9 +606,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 1.5,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),       # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 0.02,     
     },
     8:  {  # bicycle
         'confirm_threshold': 2,
@@ -592,9 +625,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 1.5,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),         # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 0.02,     
     },
     7: {  # motorcycle
         'confirm_threshold': 2,
@@ -611,9 +644,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 2.5,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),       # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 0.02,     
     },
     3:  {  # bus
         'confirm_threshold': 2,
@@ -630,9 +663,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 3.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),         # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 0.01,                   # 관측 신뢰도 높임 → detection을 적극 반영
     },
     4: {  # trailer
         'confirm_threshold': 2,
@@ -649,9 +682,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 3.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),        # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 1.0,               # 관측 신뢰도 높임 → detection을 적극 반영
     },
     2: {  # truck
         'confirm_threshold': 2,
@@ -668,9 +701,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 3.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),       # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 1.0,               # 관측 신뢰도 높임 → detection을 적극 반영
     },
     9: {  # barrier
         'confirm_threshold': 2,
@@ -687,17 +720,17 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 5.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),         # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 20,               # 관측 신뢰도 높임 → detection을 적극 반영
     },
     10: {  # traffic cone
         'confirm_threshold': 2,
         'max_unmatch': 3,
         'max_predict_len': 15,
         'max_predict_time': 1.5, 
-        'confirmed_det_score': 0.5,
-        'confirmed_match_score': 0.3,
+        'confirmed_det_score': 0.0,
+        'confirmed_match_score': 0.0,
         'is_filter_predict_box': -1,
         'expected_velocity': 0.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -706,9 +739,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 5.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),        # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 20,     
     },
     5: {  # construction_vehicle
         'confirm_threshold': 2,
@@ -725,9 +758,9 @@ CLASS_CONFIG = {
         'P_size': np.eye(3),
         'Q_size': np.eye(3),
         'R_size': np.eye(2),
-        'P_yaw': np.eye(2),
-        'Q_yaw': np.eye(2),
-        'R_yaw_scalar': 4.0,
+        'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
+        'Q_yaw': np.array([[0.1]]),        # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
+        'R_yaw_scalar': 1.0,     
     }
 }
 
@@ -741,11 +774,15 @@ class KalmanTrackedObject:
         self.status_flag = TrackState.INITIALIZATION 
         self.hits = 1
         self.yaw_drift_buffer = deque(maxlen=5)
+        self.yaw_dir_buffer = deque(maxlen=5)
         px, py = detection['position'][:2]
         vx, vy = detection.get("velocity", [0.0, 0.0])
         self.pose_state = np.array([px, py, vx, vy])
         self.confidence = 0.0
         self.time_since_update = 0.0
+        self.class_votes = defaultdict(float)
+        self.class_vote_history = deque(maxlen=10)
+        self.current_class = detection['type']
 
         class_cfg = CLASS_CONFIG.get(self.label)
         if class_cfg is not None:
@@ -755,9 +792,9 @@ class KalmanTrackedObject:
             self.size_P = class_cfg["P_size"]
             self.size_Q = class_cfg["Q_size"]
             self.size_R = class_cfg["R_size"]
-            self.yaw_P = class_cfg["P_yaw"]
-            self.yaw_Q = class_cfg["Q_yaw"]
-            # self.yaw_R = class_cfg["R_yaw"]
+            self.yaw_P = class_cfg["P_yaw"]# ← 1x1로 고정
+            self.yaw_Q = class_cfg["Q_yaw"]# 
+            self.R_yaw_scalar = class_cfg["R_yaw_scalar"]
             self.expected_velocity = class_cfg["expected_velocity"]
             self.confirm_threshold = class_cfg["confirm_threshold"]
             self.max_missed = class_cfg["max_unmatch"]
@@ -768,42 +805,44 @@ class KalmanTrackedObject:
             self.size_P = np.diag([1.0, 1.0, 1.0])
             self.size_Q = np.diag([0.1, 0.1, 0.1])
             self.size_R = np.diag([0.1, 0.1, 0.1])
-            self.yaw_P = np.diag([0.1, 0.1])
-            self.yaw_Q = np.diag([0.1, 0.1])
-            self.yaw_R = np.diag([0.2, 5.0])
+            self.yaw_P = np.array([[0.1]])  # ← fallback도 1x1
+            self.yaw_Q = np.array([[0.1]])
+            self.R_yaw_scalar = 5.0
             self.expected_velocity = 5.0
             self.confirm_threshold = 2
             self.max_missed = 3
 
         yaw = detection['yaw']
-        self.yaw_state = np.array([yaw, 0.0])
+        self.yaw_state = np.array([yaw])  # ← 1차원 yaw 상태로 초기화
         self.size_state = np.array(wlh[:3])
         self.age = 0.0
         self.missed_count = 0
         self.bboxes = []
 
     def predict(self, dt):
-        # === Kalman Prediction (pose, velocity, yaw, size) ===
+        # === Kalman Prediction (pose, velocity) ===
         F = np.eye(4)
         F[0, 2] = dt
         F[1, 3] = dt
         self.pose_state = F @ self.pose_state
-        # ✅ 여기! 감쇠 적용
-        self.pose_state[2:] *= 0.7  # 감쇠율은 0.6~0.9 사이 튜닝 가능
+
+        # ✅ 감쇠 적용 (velocity damping)
+        self.pose_state[2:] *= 0.9  # vx, vy 감쇠율 튜닝 가능
 
         self.pose_P = F @ self.pose_P @ F.T + self.pose_Q
 
-        Fy = np.eye(2)
-        Fy[0, 1] = dt
-        self.yaw_state = Fy @ self.yaw_state
-        self.yaw_P = Fy @ self.yaw_P @ Fy.T + self.yaw_Q
+        # === Kalman Prediction (yaw) ===
+        # ✅ yaw는 더 이상 예측 안 함 → 공분산만 증가
+        self.yaw_P += self.yaw_Q * dt
+
+        # ✅ yaw 값 유지 + wrap to [-π, π]
         self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
 
+        # === Kalman Prediction (size) ===
         self.size_P = self.size_P + self.size_Q
 
         self.age += dt
         self.time_since_update += dt
-
         self.confidence = self.tracking_score()
 
 
@@ -845,71 +884,174 @@ class KalmanTrackedObject:
 
     def update(self, detection, dt):
         pos = detection['position']
-        vel = detection.get('velocity', [0.0, 0.0])
 
-        # ✅ [Kalman Update] position 보정 (z = position[:2])
+        # === Kalman Position Update ===
         z = np.array(pos[:2])
-        H = np.eye(2, 4)  # position만 관측
+        H = np.eye(2, 4)
         y = z - H @ self.pose_state
-        R = self.pose_R[:2, :2] if hasattr(self, "pose_R") else np.diag([0.7, 0.7])
-        S = H @ self.pose_P @ H.T + R
+        S = H @ self.pose_P @ H.T + self.pose_R[:2, :2]
         K = self.pose_P @ H.T @ np.linalg.inv(S)
-        self.pose_state = self.pose_state + K @ y
+        self.pose_state += K @ y
         self.pose_P = (np.eye(4) - K @ H) @ self.pose_P
 
-        # ✅ 속도는 detection값 반영 (옵션: blending도 가능)
-        alpha = 0.5
-        self.pose_state[2:] = alpha * self.pose_state[2:] + (1 - alpha) * np.array(vel)
+        # === Velocity Blending ===
+        detect_vel = np.array(detection.get("velocity", [0.0, 0.0]))
+        detect_yaw = detection["yaw"]
+        speed = np.linalg.norm(detect_vel)
 
-        # ✅ 불확실도 리셋 (선택 사항)
-        # self.pose_P[2:, 2:] = np.eye(2) * 1e-1
+        def normalize_angle(rad):
+            return (rad + np.pi) % (2 * np.pi) - np.pi
+
+        if speed > 0.1:
+            vel_dir = np.arctan2(detect_vel[1], detect_vel[0])
+            vel_dir = normalize_angle(vel_dir)
+            yaw_diff_vel = normalize_angle(vel_dir - detect_yaw)
+            if abs(yaw_diff_vel) < np.radians(60):
+                alpha = 0.5
+                self.pose_state[2:4] = (1 - alpha) * self.pose_state[2:4] + alpha * detect_vel
+
+        # === Yaw Drift Buffer 기반 안정화 ===
+        z_yaw = normalize_angle(detection["yaw"])
+        est_yaw = normalize_angle(self.yaw_state[0])
+        yaw_diff = normalize_angle(z_yaw - est_yaw)
+        speed_est = np.linalg.norm(self.pose_state[2:4])
+
+        # ✅ 속도에 따라 yaw gate를 부드럽게 완화 (예: sigmoid 스케일)
+        def compute_yaw_gate(speed_est):
+            min_gate = np.radians(90)
+            max_gate = np.radians(170)
+            k = 0.8   # 스케일 팩터
+            s = 1 / (1 + np.exp(-k * (speed_est - 2.0)))  # speed_est=2.0 일 때 중간값
+            return min_gate + (max_gate - min_gate) * s
+
+        yaw_gate_threshold = compute_yaw_gate(speed_est)
+
+        if abs(yaw_diff) > yaw_gate_threshold:
+            if detection.get("confidence", 1.0) < 0.5:
+                rospy.logwarn(f"[YawReject:LowConf] ID={self.id} yaw skipped.")
+                return
+            elif speed_est < 1.0:
+                rospy.logwarn(f"[YawReject:LowSpeed] ID={self.id} yaw skipped.")
+                return
+
+        # ✅ Drift Buffer 누적 (크기 기반)
+        self.yaw_drift_buffer.append(yaw_diff)
+        if len(self.yaw_drift_buffer) == self.yaw_drift_buffer.maxlen:
+            mean_drift = np.mean(self.yaw_drift_buffer)
+            drift_mag = abs(mean_drift)
+
+            if drift_mag > np.radians(20):
+                rospy.logwarn(f"[YawDrift] ID={self.id} large drift → force overwrite")
+                self.yaw_state[0] = z_yaw
+                self.yaw_P = np.eye(1) * 0.05
+                self.yaw_drift_buffer.clear()
+                self.yaw_dir_buffer.clear()
+                return
+
+        # ✅ 추가: 방향 벡터 버퍼 누적
+        yaw_vec = np.array([np.cos(z_yaw), np.sin(z_yaw)])
+        est_vec = np.array([np.cos(est_yaw), np.sin(est_yaw)])
+        self.yaw_dir_buffer.append(yaw_vec)
+
+        # 방향 벡터 평균
+        avg_vec = np.mean(self.yaw_dir_buffer, axis=0)
+        avg_vec /= np.linalg.norm(avg_vec) + 1e-8
+
+        dot = np.dot(avg_vec, est_vec)
+
+        rospy.loginfo(f"[YawDir] ID={self.id} dot={dot:.3f}")
+
+        if dot < -0.8 and len(self.yaw_dir_buffer) == self.yaw_dir_buffer.maxlen:
+            rospy.logwarn(f"[YawDirFlip] ID={self.id} persistent flip → force overwrite")
+            self.yaw_state[0] = z_yaw
+            self.yaw_P = np.eye(1) * 0.05
+            self.yaw_dir_buffer.clear()
+            self.yaw_drift_buffer.clear()
+            return
+
+        # === Yaw Kalman Update ===
+        H = np.array([[1.0]])
+        R = self.R_yaw_scalar
+        S = H @ self.yaw_P @ H.T + R
+        K = self.yaw_P @ H.T / S
+
+        deg = lambda rad: rad * 180.0 / np.pi
+
+        rospy.loginfo(
+            f"[YawUpdate] ID={self.id} detection={deg(z_yaw):.1f}°, "
+            f"est={deg(est_yaw):.1f}°, diff={deg(yaw_diff):.1f}°, "
+            f"K={K[0][0]:.3f}, update={deg(K[0][0] * yaw_diff):.1f}°"
+        )
+
+        self.yaw_state[0] += (K * yaw_diff).item()
+        self.yaw_state[0] = normalize_angle(self.yaw_state[0])
+        self.yaw_P = (np.eye(1) - K @ H) @ self.yaw_P
+
 
         # # ✅ Yaw 덮어쓰기 (간단화)
         # self.yaw_state[0] = detection['yaw']
         # self.yaw_state[1] = 0.0
         # self.yaw_P = np.eye(2) * 1e-2
 
-        # === Yaw 제한 보정 with 튐 누적 보완 + 속도 기반 완화 ===
-        def normalize_angle(angle):
-            return (angle + np.pi) % (2 * np.pi) - np.pi
+        # # === Yaw 제한 보정 with 튐 누적 보완 + 속도 기반 완화 ===
+        # def normalize_angle(angle):
+        #     return (angle + np.pi) % (2 * np.pi) - np.pi
 
-        yaw_det = detection['yaw']
-        yaw_diff = normalize_angle(yaw_det - self.yaw_state[0])
-        self.yaw_drift_buffer.append(yaw_diff)
-        if len(self.yaw_drift_buffer) > 5:
-            self.yaw_drift_buffer.popleft()
+        # yaw_det = detection['yaw']
+        # prev_yaw = self.yaw_state[0]
+        # dt = max(dt, 1e-3)
 
-        mean_drift = np.mean(self.yaw_drift_buffer)
-        v = np.linalg.norm(self.pose_state[2:4])
-        yaw_drift = abs(mean_drift)
+        # # 1️⃣ 기본 yaw 차이
+        # yaw_diff = normalize_angle(yaw_det - prev_yaw)
+        # yaw_rate = abs(yaw_diff) / dt
+        # max_yaw_rate = np.radians(90)
 
-        # === 조건별 보정 계수 설정
-        if v < 0.2:
-            coeff = 0.4  # 정지 시에도 빠르게 보정
-        elif v < 1.0:
-            coeff = 0.3
-        else:
-            coeff = 0.2 if yaw_drift < np.radians(3) else 0.4
+        # # 2️⃣ 드리프트 버퍼 관리 (조건과 무관하게 항상 누적)
+        # self.yaw_drift_buffer.append(yaw_diff)
+        # if len(self.yaw_drift_buffer) > 5:
+        #     self.yaw_drift_buffer.popleft()
 
-        # === 보정 적용
-        if yaw_drift > np.radians(15):
-            # 🎯 너무 큰 튐은 detection 덮어쓰기
-            self.yaw_state[0] = yaw_det
-            self.yaw_state[1] = 0.0
-            self.yaw_P = np.eye(2) * 1e-2
-            self.yaw_drift_buffer.clear()
-        elif abs(mean_drift) < 0.5:
-            # 🔄 점진적 Kalman-like 보정
-            self.yaw_state[0] += coeff * mean_drift
-            self.yaw_state[0] = normalize_angle(self.yaw_state[0])
-            self.yaw_state[1] = 0.0
-            self.yaw_P = np.eye(2) * 1e-2
-        elif len(self.yaw_drift_buffer) == 5 and all(abs(d) > 0.5 for d in self.yaw_drift_buffer):
-            # 🧠 반복적으로 틀리면 강제 덮어쓰기
-            self.yaw_state[0] = yaw_det
-            self.yaw_state[1] = 0.0
-            self.yaw_P = np.eye(2) * 1e-2
-            self.yaw_drift_buffer.clear()
+        # mean_drift = np.mean(self.yaw_drift_buffer)
+        # v = np.linalg.norm(self.pose_state[2:4])
+        # yaw_drift = abs(mean_drift)
+
+        # # 3️⃣ 보정 계수
+        # if v < 0.3:
+        #     coeff = 0.0
+        # elif v < 2.0:
+        #     coeff = 0.2
+        # else:
+        #     coeff = 0.4
+
+        # # 4️⃣ 강제 튐 제거: rate 너무 크면 임시 무시 (단순 skip 아님!)
+        # if yaw_rate > max_yaw_rate and yaw_drift < np.radians(45):
+        #     rospy.logwarn(f"[YawFilter] Unrealistic yaw flip → skip (Δ{np.degrees(yaw_diff):.1f}°)")
+        #     return  # ⛔ 너무 튄 거면 이번 프레임 업데이트 skip (다음 프레임 기다림)
+
+        # # 5️⃣ 보정 방식 결정
+        # if yaw_drift > np.radians(15):
+        #     self.yaw_state[0] = yaw_det
+        #     self.yaw_state[1] = 0.0
+        #     self.yaw_P = np.eye(2) * 1e-2
+        #     self.yaw_drift_buffer.clear()
+
+        # elif abs(mean_drift) < 0.5:
+        #     self.yaw_state[0] += coeff * mean_drift
+        #     self.yaw_state[0] = normalize_angle(self.yaw_state[0])
+        #     self.yaw_state[1] = 0.0
+        #     self.yaw_P = np.eye(2) * 1e-2
+
+        # elif (
+        #     len(self.yaw_drift_buffer) == 5 and
+        #     all(abs(d) > 0.3 for d in self.yaw_drift_buffer) and
+        #     np.sign(self.yaw_drift_buffer[0]) == np.sign(self.yaw_drift_buffer[-1])
+        # ):
+        #     # fallback: 지속적으로 한 방향으로 drift → 강제 yaw 수용
+        #     rospy.logwarn(f"[YawCorrection] Consistent yaw drift → override to detection")
+        #     self.yaw_state[0] = yaw_det
+        #     self.yaw_state[1] = 0.0
+        #     self.yaw_P = np.eye(2) * 1e-2
+        #     self.yaw_drift_buffer.clear()
 
         # # Yaw Kalman Update (안정화 버전)
         # z_yaw = detection["yaw"]
@@ -938,13 +1080,22 @@ class KalmanTrackedObject:
         # self.size_P = np.eye(3) * 1e-2
 
         # ✅ Size Kalman update (x, y, z에 대해 관측값 적용)
-        z_size = np.array(detection['size'][:2]) 
-        H_size = np.eye(2, 3) 
-        y_size = z_size - H_size @ self.size_state
-        S_size = H_size @ self.size_P @ H_size.T + self.size_R  # now (2x2)
-        K_size = self.size_P @ H_size.T @ np.linalg.inv(S_size)
-        self.size_state = self.size_state + K_size @ y_size
-        self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P + self.size_Q
+        # z_size = np.array(detection['size'][:2]) 
+        # H_size = np.eye(2, 3) 
+        # y_size = z_size - H_size @ self.size_state
+        # S_size = H_size @ self.size_P @ H_size.T + self.size_R  # now (2x2)
+        # K_size = self.size_P @ H_size.T @ np.linalg.inv(S_size)
+        # self.size_state = self.size_state + K_size @ y_size
+        # self.size_P = (np.eye(3) - K_size @ H_size) @ self.size_P + self.size_Q
+
+        # === size blending update ===
+        det_size = np.array(detection['size'][:2])
+        alpha = 0.3
+        self.size_state[:2] = (1 - alpha) * self.size_state[:2] + alpha * det_size
+
+        # Optional: height 업데이트
+        if len(detection['size']) == 3:
+            self.size_state[2] = (1 - alpha) * self.size_state[2] + alpha * detection['size'][2]
 
         # ✅ 기타 상태 업데이트
         self.missed_count = 0
@@ -963,7 +1114,6 @@ class KalmanTrackedObject:
         ):
             self.status_flag = TrackState.CONFIRMED
 
-
         new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
             "category": self.label,
             "detection_score": self.confidence,
@@ -978,6 +1128,26 @@ class KalmanTrackedObject:
         if len(self.bboxes) > 30:
             self.bboxes.pop(0)
 
+        # === 클래스 투표 기반 current_class 갱신 (심플 버전) ===
+        det_cls = detection['type']
+        self.class_vote_history.append(det_cls)
+
+        # 최대 길이 유지
+        if len(self.class_vote_history) > 10:
+            self.class_vote_history.popleft()
+
+        # 최빈값 계산
+        vote_counts = {}
+        for c in self.class_vote_history:
+            vote_counts[c] = vote_counts.get(c, 0) + 1
+
+        most_common = max(vote_counts.items(), key=lambda x: x[1])[0]
+
+        if most_common != self.label:
+            rospy.loginfo(f"[ClassChange] ID={self.id} {self.label} → {most_common}")
+            self.label = most_common
+            self.current_class = most_common
+            
     def tracking_score(self):
         vel = np.hypot(self.pose_state[2], self.pose_state[3])
         expected_vel = self.expected_velocity
@@ -1008,7 +1178,6 @@ class KalmanTrackedObject:
             self.pose_state[1],
             np.hypot(self.pose_state[2], self.pose_state[3]),
             self.yaw_state[0],
-            self.yaw_state[1]
         ])
 
     @property
@@ -1086,6 +1255,13 @@ class KalmanMultiObjectTracker:
             if best_track is not None:
                 best_track.status_flag = TrackState.CONFIRMED
                 confidence = det.get("confidence", 0.5)
+
+                # ✅ Yaw mismatch 보정 (90도 이상 차이 날 경우)
+                if abs(best_track.yaw_state[0] - det['yaw']) > np.radians(90):
+                    rospy.logwarn(f"[YawInitFix] ReID된 트랙의 yaw가 detection과 너무 다름 → 덮어쓰기")
+                    best_track.yaw_state[0] = det['yaw']
+                    best_track.yaw_P = np.eye(1) * 0.1  # 공분산도 초기화
+
                 best_track.update(det, dt)
                 best_track.hits += 1
                 used.append(di)
@@ -1124,22 +1300,33 @@ class KalmanMultiObjectTracker:
         used_r = self._recover_obscured_tracks(unmatched_dets, detections, dt)
         unmatched_dets = [d for d in unmatched_dets if d not in used_r]
 
-        # 5) 새로운 트랙 생성 (중복 방지 포함)
+        # 5) 새로운 트랙 생성 (클래스 무관 중복 체크)
         for di in unmatched_dets:
             det = detections[di]
-            is_duplicate = False
+            det_label = det["type"]
+            is_duplicate = False   # ✅ 꼭 여기에서 초기화해야 함
+
             for t in self.tracks:
-                if t.label != det["type"]:
-                    continue
                 if t.status_flag not in [TrackState.CONFIRMED, TrackState.OBSCURED]:
                     continue
+
+                group_det = get_class_group(det_label)
+                group_trk = get_class_group(t.label)
+                if group_det != group_trk:
+                    continue
+
                 dist = np.linalg.norm(t.x[:2] - det["position"][:2])
                 if dist > 1.5:
                     continue
-                score = ro_gdiou_2d(t.size[:2], det['size'][:2], t.x[3], det['yaw'])
-                if score > 0.7:
+
+                score = ro_gdiou_2d(t.size[:2], det["size"][:2], t.x[3], det["yaw"])
+                if score > 0.4:
+                    rospy.logwarn(
+                        f"[Duplicate Suppressed] Det(type={det_label}) near track(id={t.id}, type={t.label}) → dist={dist:.2f}, GDIoU={score:.2f}"
+                    )
                     is_duplicate = True
                     break
+
             if not is_duplicate:
                 self.tracks.append(KalmanTrackedObject(det))
 
@@ -1165,34 +1352,44 @@ class KalmanMultiObjectTracker:
         ]
 
         # 상태 출력
-        rospy.loginfo(f"[Tracker] Total Tracks: {len(self.tracks)}")
+        # rospy.loginfo(f"[Tracker] Total Tracks: {len(self.tracks)}")
 
     def get_tracks(self):
         results = []
 
-        # ✅ 평가 대상 클래스만 기록 (NuScenes 기준)
-        VALID_LOG_LABELS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10
-                            }
+        VALID_LOG_LABELS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+        filtered_tracks = []
 
         for t in self.tracks:
-            if CLASS_CONFIG[t.label].get("is_filter_predict_box", -1) == 1 and t.hits == 0:
-                continue
             if t.status_flag != TrackState.CONFIRMED:
                 continue
-            if t.status_flag == TrackState.OBSCURED:
-                continue
-            if getattr(t, 'traj_length', 0) < 1:
+            if t.traj_length < 1:
                 continue
             if t.label not in VALID_LOG_LABELS:
                 continue
+            filtered_tracks.append(t)
 
-            # # ✅ 여기 추가: 특정 좌표에 있는 트랙만 로깅
-            # FIXED_X, FIXED_Y = -12.9, 4.8  # 대략 찍은 위치 근처
-            # if t.label == 1 and abs(t.x[0] - FIXED_X) < 0.5 and abs(t.x[1] - FIXED_Y) < 0.5:
-            #     with open("/tmp/track_id_at_location.txt", "a") as f:
-            #         f.write(f"[FIXED_TRACK] ID={t.id}, x={t.x[0]:.2f}, y={t.x[1]:.2f}, traj_len={t.traj_length}\n")
+        # 🔥 중복 제거: 같은 위치에 다른 class 둘 이상 있는 경우
+        unique_tracks = []
+        for t in filtered_tracks:
+            is_duplicate = False
+            for u in unique_tracks:
+                dist = np.linalg.norm(t.x[:2] - u.x[:2])
+                if dist > 1.5:
+                    continue
+                score = ro_gdiou_2d(t.size[:2], u.size[:2], t.x[3], u.x[3])
+                if score > 0.6:
+                    # 둘 중 confidence 낮은 걸 제거
+                    if t.confidence < u.confidence:
+                        is_duplicate = True
+                        break
+                    else:
+                        unique_tracks.remove(u)
+                        break
+            if not is_duplicate:
+                unique_tracks.append(t)
 
-            # 기존 트랙 결과에 추가
+        for t in unique_tracks:
             x, y, yaw = t.x[0], t.x[1], t.x[3]
             size = t.size
             score = t.confidence
@@ -1203,12 +1400,13 @@ class KalmanMultiObjectTracker:
                 "yaw":        yaw,
                 "size":       size,
                 "confidence": score,
-                "type":       t.label,
+                "type":       t.current_class,
                 "velocity":   t.pose_state[2:4].tolist(),
                 "position":   [x, y, t.bboxes[-1].global_xyz[2] if t.bboxes else 0.0]
             })
 
-        return results
+        return results 
+
     
 
 class MCTrackTrackerNode:
@@ -1217,23 +1415,25 @@ class MCTrackTrackerNode:
         "truck": 2,
         "bus": 3,
         "trailer": 4,
-        "construction vehicle": 5,
+        "constructionvehicle": 5,
         "pedestrian": 6,
         "motorcycle": 7,
         "bicycle": 8,
         "barrier": 9,
-        "traffic cone": 10,
+        "trafficcone": 10,
     }
     def __init__(self):
         # 1) 반드시 init_node 부터 호출
         rospy.init_node("mctrack_tracker_node", anonymous=True)
 
         # === [A] 타이머들 초기화 ===
-        self.tracking_timer = rospy.Timer(rospy.Duration(0.1), self.tracking_publish_callback)  # 기존 퍼블리시 루프
-        self.marker_timer   = rospy.Timer(rospy.Duration(0.1), self.visualization_timer_callback)  # RViz 마커용 루프
+        self.tracking_timer = rospy.Timer(rospy.Duration(0.05), self.tracking_publish_callback)  # 기존 퍼블리시 루프
+        self.marker_timer   = rospy.Timer(rospy.Duration(0.05), self.visualization_timer_callback)  # RViz 마커용 루프
         # self.predict_timer  = rospy.Timer(rospy.Duration(0.1), self.tracker_loop)  # ✅ 트래커 예측 루프 (10Hz)
 
         self.last_predict_time = None  # ✅ 트래커 루프용 시간 변수
+
+        self.is_fusion_mode = False
 
         self.frame_idx       = 0
         self.start_time      = rospy.Time.now()
@@ -1407,7 +1607,7 @@ class MCTrackTrackerNode:
             self.last_time_stamp = msg.header.stamp
 
             self.frame_idx += 1
-            rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
+            # rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
 
             # [3] 동일 타임스탬프 중복 수신 방지
             if hasattr(self, "last_timestamp_sec") and abs(timestamp_sec - self.last_timestamp_sec) < 1e-6:
@@ -1416,17 +1616,39 @@ class MCTrackTrackerNode:
 
             # [4] Detection 메시지 → 내부 dict 포맷으로 변환 + 필터링
             VALID_CLASSES = set(CLASS_CONFIG.keys())
-            class_min_confidence = {
-                1: 0.03, 2: 0.04, 3: 0.03, 4: 0.03, 5: 0.02,
-                6: 0.08, 7: 0.02, 8: 0.02, 9: 0.02, 10: 0.01
-            }
+            if self.is_fusion_mode:
+                self.class_min_confidence = {
+                    1: 0.03,   # car
+                    2: 0.03,   # truck
+                    3: 0.03,   # bus
+                    4: 0.03,   # trailer
+                    5: 0.02,   # construction vehicle
+                    6: 0.08,   # pedestrian 
+                    7: 0.02,   # motorcycle
+                    8: 0.02,   # bicycle
+                    9: 0.02,   # barrier
+                    10: 0.01   # traffic cone 
+                }# BEVFusion
+            else:
+                self.class_min_confidence = {
+                    1: 0.14,  # Car
+                    2: 0.08,  # Truck
+                    3: 0.08,  # Bus
+                    4: 0.08,  # Trailer
+                    5: 0.12,  # ConstructionVehicle
+                    6: 0.02,  # Pedestrian
+                    7: 0.1,  # Motorcycle 
+                    8: 0.02,  # Bicycle
+                    9: 0.15,  # Barrier
+                    10: 0.02, # TrafficCone
+                } # LiDAR-only  
             detections = []
             for i, obj in enumerate(msg.objects):
                 label_str = obj.label.strip().lower()
                 label = self.LABEL_STR_TO_ID.get(label_str, -1)
                 if label not in VALID_CLASSES:
                     continue
-                if obj.score < class_min_confidence.get(label, 0.0):
+                if obj.score < self.class_min_confidence.get(label, 0.0):
                     continue
                 detections.append({
                     "id":         i,
@@ -1457,9 +1679,15 @@ class MCTrackTrackerNode:
             # [6] 트래커 업데이트만 수행 (예측은 타이머 루프에서 수행됨)
             self.tracker.update(detections, dt)
 
+            # [6.5] ✅ detection 시각 이후의 시간만큼 추가 예측 (현재 시점 보정)
+            now = rospy.Time.now()
+            dt_extra = (now - msg.header.stamp).to_sec()
+            if dt_extra > 1e-3:
+                self.tracker.predict(dt_extra)
+
             # [7] 추적 결과를 변환하여 메시지로 구성
             tracks = self.tracker.get_tracks()
-            rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
+            # rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
 
             ta = PfGMFATrackArray(header=msg.header)
             for t in tracks:
