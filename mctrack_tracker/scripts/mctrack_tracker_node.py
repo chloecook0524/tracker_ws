@@ -928,10 +928,10 @@ class KalmanTrackedObject:
 
         if abs(yaw_diff) > yaw_gate_threshold:
             if detection.get("confidence", 1.0) < 0.5:
-                rospy.logwarn(f"[YawReject:LowConf] ID={self.id} yaw skipped.")
+                # rospy.logwarn(f"[YawReject:LowConf] ID={self.id} yaw skipped.")
                 return
             elif speed_est < 1.0:
-                rospy.logwarn(f"[YawReject:LowSpeed] ID={self.id} yaw skipped.")
+                # rospy.logwarn(f"[YawReject:LowSpeed] ID={self.id} yaw skipped.")
                 return
 
         # ✅ Drift Buffer 누적 (크기 기반)
@@ -941,7 +941,7 @@ class KalmanTrackedObject:
             drift_mag = abs(mean_drift)
 
             if drift_mag > np.radians(20):
-                rospy.logwarn(f"[YawDrift] ID={self.id} large drift → force overwrite")
+                # rospy.logwarn(f"[YawDrift] ID={self.id} large drift → force overwrite")
                 self.yaw_state[0] = z_yaw
                 self.yaw_P = np.eye(1) * 0.05
                 self.yaw_drift_buffer.clear()
@@ -959,10 +959,10 @@ class KalmanTrackedObject:
 
         dot = np.dot(avg_vec, est_vec)
 
-        rospy.loginfo(f"[YawDir] ID={self.id} dot={dot:.3f}")
+        # rospy.loginfo(f"[YawDir] ID={self.id} dot={dot:.3f}")
 
         if dot < -0.8 and len(self.yaw_dir_buffer) == self.yaw_dir_buffer.maxlen:
-            rospy.logwarn(f"[YawDirFlip] ID={self.id} persistent flip → force overwrite")
+            # rospy.logwarn(f"[YawDirFlip] ID={self.id} persistent flip → force overwrite")
             self.yaw_state[0] = z_yaw
             self.yaw_P = np.eye(1) * 0.05
             self.yaw_dir_buffer.clear()
@@ -977,11 +977,11 @@ class KalmanTrackedObject:
 
         deg = lambda rad: rad * 180.0 / np.pi
 
-        rospy.loginfo(
-            f"[YawUpdate] ID={self.id} detection={deg(z_yaw):.1f}°, "
-            f"est={deg(est_yaw):.1f}°, diff={deg(yaw_diff):.1f}°, "
-            f"K={K[0][0]:.3f}, update={deg(K[0][0] * yaw_diff):.1f}°"
-        )
+        # rospy.loginfo(
+        #     f"[YawUpdate] ID={self.id} detection={deg(z_yaw):.1f}°, "
+        #     f"est={deg(est_yaw):.1f}°, diff={deg(yaw_diff):.1f}°, "
+        #     f"K={K[0][0]:.3f}, update={deg(K[0][0] * yaw_diff):.1f}°"
+        # )
 
         self.yaw_state[0] += (K * yaw_diff).item()
         self.yaw_state[0] = normalize_angle(self.yaw_state[0])
@@ -1258,7 +1258,7 @@ class KalmanMultiObjectTracker:
 
                 # ✅ Yaw mismatch 보정 (90도 이상 차이 날 경우)
                 if abs(best_track.yaw_state[0] - det['yaw']) > np.radians(90):
-                    rospy.logwarn(f"[YawInitFix] ReID된 트랙의 yaw가 detection과 너무 다름 → 덮어쓰기")
+                    # rospy.logwarn(f"[YawInitFix] ReID된 트랙의 yaw가 detection과 너무 다름 → 덮어쓰기")
                     best_track.yaw_state[0] = det['yaw']
                     best_track.yaw_P = np.eye(1) * 0.1  # 공분산도 초기화
 
@@ -1321,9 +1321,9 @@ class KalmanMultiObjectTracker:
 
                 score = ro_gdiou_2d(t.size[:2], det["size"][:2], t.x[3], det["yaw"])
                 if score > 0.4:
-                    rospy.logwarn(
-                        f"[Duplicate Suppressed] Det(type={det_label}) near track(id={t.id}, type={t.label}) → dist={dist:.2f}, GDIoU={score:.2f}"
-                    )
+                    # rospy.logwarn(
+                    #     f"[Duplicate Suppressed] Det(type={det_label}) near track(id={t.id}, type={t.label}) → dist={dist:.2f}, GDIoU={score:.2f}"
+                    # )
                     is_duplicate = True
                     break
 
@@ -1470,8 +1470,6 @@ class MCTrackTrackerNode:
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
 
-        self.predict_timer = rospy.Timer(rospy.Duration(0.05), self.tracker_loop)  # 20Hz 루프 추가
-
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
     def chassis_callback(self, msg):
@@ -1554,21 +1552,6 @@ class MCTrackTrackerNode:
             ta.tracks.append(m)
 
         self.tracking_pub.publish(ta)
-
-    def tracker_loop(self, event):
-        now = rospy.Time.now()
-        if self.last_predict_time is None:
-            self.last_predict_time = now
-            return
-
-        dt = (now - self.last_predict_time).to_sec()
-        self.last_predict_time = now
-
-        if dt <= 0:
-            return
-
-        self.tracker.predict(dt)
-
 
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
@@ -1670,11 +1653,15 @@ class MCTrackTrackerNode:
                     # ✅ chassis 데이터를 기반으로 정확한 적분 방식 보상 적용
                     dx, dy, dyaw = self.integrate_ego_motion(samples, t0, t1, self.ego_yaw)
                     self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
-                else:
+                # else:
                     # ✅ chassis 데이터가 없으면 보상 생략 (추론 왜곡 방지)
-                    rospy.logwarn("[EgoComp] No chassis samples available — skipping ego-motion compensation")
-            else:
-                rospy.logwarn(f"Skipping ego compensation for dt={dt:.3f}s")
+                    # rospy.logwarn("[EgoComp] No chassis samples available — skipping ego-motion compensation")
+            # else:
+            #     rospy.logwarn(f"Skipping ego compensation for dt={dt:.3f}s")
+            
+            # ✅ 바로 Kalman predict() 수행
+            self.tracker.predict(dt)
+            rospy.loginfo(f"[Predict] dt={dt:.3f}s | Total Tracks: {len(self.tracker.tracks)}")
 
             # [6] 트래커 업데이트만 수행 (예측은 타이머 루프에서 수행됨)
             self.tracker.update(detections, dt)
