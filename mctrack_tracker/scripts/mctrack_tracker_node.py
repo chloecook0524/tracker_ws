@@ -1542,7 +1542,7 @@ class MCTrackTrackerNode:
         tracks = self.tracker.get_tracks()
 
         ta = PfGMFATrackArray()
-        ta.header.stamp = rospy.Time.now() 
+        ta.header.stamp = self.last_detection_stamp
         ta.header.frame_id = "vehicle"
 
         for t in tracks:
@@ -1682,12 +1682,6 @@ class MCTrackTrackerNode:
 
             # [6] 트래커 업데이트만 수행 (예측은 타이머 루프에서 수행됨)
             self.tracker.update(detections, dt)
-
-            # [6.5] ✅ detection 시각 이후의 시간만큼 추가 예측 (현재 시점 보정)
-            now = rospy.Time.now()
-            dt_extra = (now - msg.header.stamp).to_sec()
-            if dt_extra > 1e-3:
-                self.tracker.predict(dt_extra)
 
             # [7] 추적 결과를 변환하여 메시지로 구성
             tracks = self.tracker.get_tracks()
