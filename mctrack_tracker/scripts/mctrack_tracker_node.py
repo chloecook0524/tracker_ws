@@ -1471,6 +1471,10 @@ class MCTrackTrackerNode:
         self.last_time_stamp = None
 
         self.predict_timer = rospy.Timer(rospy.Duration(0.05), self.tracker_loop)  # 20Hz 루프 추가
+        
+        # ✅ [여기] === 마지막에 같이 넣어주세요 ===
+        self.last_predict_stamp = None
+        self.last_detection_stamp = None
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
 
@@ -1556,18 +1560,15 @@ class MCTrackTrackerNode:
         self.tracking_pub.publish(ta)
 
     def tracker_loop(self, event):
-        now = rospy.Time.now()
-        if self.last_predict_time is None:
-            self.last_predict_time = now
-            return
+        if self.last_predict_stamp is None or self.last_detection_stamp is None:
+            return  # 아직 detection이 안 들어오면 skip
 
-        dt = (now - self.last_predict_time).to_sec()
-        self.last_predict_time = now
-
+        dt = (self.last_detection_stamp - self.last_predict_stamp).to_sec()
         if dt <= 0:
             return
 
         self.tracker.predict(dt)
+        self.last_predict_stamp = self.last_detection_stamp
 
 
     def delete_all_markers(self):
@@ -1585,9 +1586,12 @@ class MCTrackTrackerNode:
             # [1] 타임스탬프 계산 및 자차 상태 추정
             timestamp_sec = msg.header.stamp.to_sec()
 
-            # ✅ 최초 예측 시간 초기화 (타이머 루프에서 predict할 때 사용)
-            if self.last_predict_time is None:
-                self.last_predict_time = msg.header.stamp
+            # ✅ 최초 초기화: predict 타이머가 쓸 수 있게!
+            if self.last_predict_stamp is None:
+                self.last_predict_stamp = msg.header.stamp
+
+            # ✅ 매 detection마다 최신으로 갱신!
+            self.last_detection_stamp = msg.header.stamp
 
             # ✅ 자차 상태 추정 (속도 + 요레이트)
             nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
