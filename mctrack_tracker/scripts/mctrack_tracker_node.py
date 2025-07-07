@@ -894,7 +894,7 @@ class KalmanTrackedObject:
         self.pose_state += K @ y
         self.pose_P = (np.eye(4) - K @ H) @ self.pose_P
 
-        # === Velocity Blending ===
+        # === Velocity Blending + Zero Clamp ===
         detect_vel = np.array(detection.get("velocity", [0.0, 0.0]))
         detect_yaw = detection["yaw"]
         speed = np.linalg.norm(detect_vel)
@@ -909,7 +909,10 @@ class KalmanTrackedObject:
             if abs(yaw_diff_vel) < np.radians(60):
                 alpha = 0.5
                 self.pose_state[2:4] = (1 - alpha) * self.pose_state[2:4] + alpha * detect_vel
-
+        else:
+            # ✅ 디텍션 속도가 0이면 Kalman 속도도 꺼줌
+            self.pose_state[2:4] = np.zeros(2)
+            
         # === Yaw Drift Buffer 기반 안정화 ===
         z_yaw = normalize_angle(detection["yaw"])
         est_yaw = normalize_angle(self.yaw_state[0])
@@ -1433,7 +1436,7 @@ class MCTrackTrackerNode:
 
         self.last_predict_time = None  # ✅ 트래커 루프용 시간 변수
 
-        self.is_fusion_mode = False
+        self.is_fusion_mode = True
 
         self.frame_idx       = 0
         self.start_time      = rospy.Time.now()
