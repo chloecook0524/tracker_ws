@@ -912,7 +912,6 @@ class KalmanTrackedObject:
         else:
             # ✅ 디텍션 속도가 0이면 Kalman 속도도 꺼줌
             self.pose_state[2:4] = np.zeros(2)
-            
         # === Yaw Drift Buffer 기반 안정화 ===
         z_yaw = normalize_angle(detection["yaw"])
         est_yaw = normalize_angle(self.yaw_state[0])
@@ -1501,9 +1500,9 @@ class MCTrackTrackerNode:
     def integrate_ego_motion(self, samples, t0, t1, initial_yaw):
         dx_total, dy_total, dyaw_total = 0.0, 0.0, 0.0
         last_time = t0
-        yaw = initial_yaw
+        yaw = initial_yaw  # ✅ 차량 현재 yaw(rad)로 초기화!
 
-        rear_axle_offset = 1.4 # ✅ 차량 중심에서 뒤차축까지의 거리 (차량마다 다름)
+        rear_axle_offset = 1.4  # ✅ 차량마다 맞게 설정
 
         for msg in samples:
             curr_time = msg.header.stamp.to_sec()
@@ -1511,24 +1510,25 @@ class MCTrackTrackerNode:
             if dt <= 0:
                 continue
 
-            avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr +
-                            msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
+            avg_speed_kph = (msg.whl_spd_fl + msg.whl_spd_fr + msg.whl_spd_rl + msg.whl_spd_rr) / 4.0
             vel = avg_speed_kph / 3.6
-            yaw_rate = msg.cr_yrs_yr * np.pi / 180.0
+            yaw_rate = msg.cr_yrs_yr * np.pi / 180.0  # deg/s → rad/s
 
-            # ✅ rear axle 기준으로 속도 보정
-            v_rear = vel - yaw_rate * rear_axle_offset
+            v_center = vel + yaw_rate * rear_axle_offset  # ✅ 차량 중심으로 보정
 
-            dx = v_rear * dt * np.cos(yaw)
-            dy = v_rear * dt * np.sin(yaw)
+            dx = v_center * dt * np.cos(yaw)
+            dy = v_center * dt * np.sin(yaw)
             dyaw = yaw_rate * dt
 
             dx_total += dx
             dy_total += dy
             dyaw_total += dyaw
-            yaw += dyaw
+            yaw += dyaw  # ✅ 회전 누적
 
             last_time = curr_time
+
+            rospy.loginfo(f"[EgoCompInt] dt={dt:.3f}s yaw={np.degrees(yaw):.1f}° "
+                        f"dx={dx:.3f}, dy={dy:.3f}, dyaw={dyaw:.3f} rad")
 
         return dx_total, dy_total, dyaw_total
     
