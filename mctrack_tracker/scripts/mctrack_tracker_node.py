@@ -1502,7 +1502,7 @@ class MCTrackTrackerNode:
         last_time = t0
         yaw = initial_yaw  # ✅ 차량 현재 yaw(rad)로 초기화!
 
-        rear_axle_offset = 1.4  # ✅ 차량마다 맞게 설정
+        rear_axle_offset = 1.0  # ✅ 차량마다 맞게 설정
 
         for msg in samples:
             curr_time = msg.header.stamp.to_sec()
