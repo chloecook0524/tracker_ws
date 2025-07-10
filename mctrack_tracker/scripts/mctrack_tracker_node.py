@@ -1738,7 +1738,7 @@ class MCTrackTrackerNode:
             rospy.logerr(f"[detection_callback] Unexpected error: {e}\n{traceback.format_exc()}")
 
 if __name__ == '__main__':
-    open("/tmp/mctrack_cost_debug.txt", "w").close() 
+    # open("/tmp/mctrack_cost_debug.txt", "w").close() 
     try:
         MCTrackTrackerNode()
         rospy.spin()
