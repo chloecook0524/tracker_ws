@@ -577,8 +577,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 25,
         'max_predict_time': 2.5, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 10.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -589,15 +588,14 @@ CLASS_CONFIG = {
         'R_size': np.eye(2),
         'P_yaw': np.array([[0.1]]),      # ✅ 반드시 1x1
         'Q_yaw': np.array([[0.1]]),      # yaw, yaw_rate 잡음 적당히 반영 (예: 10Hz 기준)
-        'R_yaw_scalar': 0.001,               # 관측 신뢰도 높임 → detection을 적극 반영
+        'R_yaw_scalar': 0.1,               # 관측 신뢰도 높임 → detection을 적극 반영
     },
     6: {  # pedestrian
         'confirm_threshold': 2,                 # 기존 1
         'max_unmatch': 4,                       # 기존 1
         'max_predict_len': 25,                  # 기존 7 * 2.8
         'max_predict_time': 2.5, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 1.5,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -615,8 +613,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 25,
         'max_predict_time': 2.5, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 7.0,
         'P': np.diag([1.0, 1.0, 1.0, 1.0]),
@@ -634,8 +631,7 @@ CLASS_CONFIG = {
         'max_unmatch': 4,
         'max_predict_len': 30,
         'max_predict_time': 3.0, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 8.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -653,8 +649,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 28,
         'max_predict_time': 2.8, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 6.0,
         'P': np.diag([100.0, 100.0, 100.0, 100.0]),
@@ -672,8 +667,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 20,
         'max_predict_time': 2.0, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 3.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -691,8 +685,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 30,
         'max_predict_time': 3.0, 
-        'confirmed_det_score': 0.7,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.7,
         'is_filter_predict_box': -1,
         'expected_velocity': 1.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -710,8 +703,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 15,
         'max_predict_time': 1.5, 
-        'confirmed_det_score': 0.5,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.5,
         'is_filter_predict_box': -1,
         'expected_velocity': 0.0,  # 정적 객체로 가정
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -729,7 +721,6 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 15,
         'max_predict_time': 1.5, 
-        'confirmed_det_score': 0.0,
         'confirmed_match_score': 0.0,
         'is_filter_predict_box': -1,
         'expected_velocity': 0.0,
@@ -748,8 +739,7 @@ CLASS_CONFIG = {
         'max_unmatch': 3,
         'max_predict_len': 20,
         'max_predict_time': 2.0, 
-        'confirmed_det_score': 0.5,
-        'confirmed_match_score': 0.3,
+        'confirmed_match_score': 0.5,
         'is_filter_predict_box': -1,
         'expected_velocity': 3.0,
         'P': np.diag([1.0, 1.0, 10.0, 10.0]),
@@ -902,6 +892,16 @@ class KalmanTrackedObject:
         def normalize_angle(rad):
             return (rad + np.pi) % (2 * np.pi) - np.pi
 
+        if speed > 0.1:
+            vel_dir = np.arctan2(detect_vel[1], detect_vel[0])
+            vel_dir = normalize_angle(vel_dir)
+            yaw_diff_vel = normalize_angle(vel_dir - detect_yaw)
+            if abs(yaw_diff_vel) < np.radians(60):
+                alpha = 0.5
+                self.pose_state[2:4] = (1 - alpha) * self.pose_state[2:4] + alpha * detect_vel
+        else:
+            # ✅ 디텍션 속도가 0이면 Kalman 속도도 꺼줌
+            self.pose_state[2:4] = np.zeros(2)
         # === Yaw Drift Buffer 기반 안정화 ===
         z_yaw = normalize_angle(detection["yaw"])
         est_yaw = normalize_angle(self.yaw_state[0])
@@ -1100,10 +1100,7 @@ class KalmanTrackedObject:
         alpha, beta = get_confidence_weights(self.label)
         self.confidence = alpha * det_score + beta * pred_score
 
-        if self.traj_length > self.confirm_threshold or (
-            self.confidence > CLASS_CONFIG[self.label]["confirmed_det_score"] and
-            self.confidence > CLASS_CONFIG[self.label]["confirmed_match_score"]
-        ):
+        if self.traj_length > self.confirm_threshold or self.confidence > CLASS_CONFIG[self.label]["confirmed_match_score"]:
             self.status_flag = TrackState.CONFIRMED
 
         new_bbox = BBox(frame_id=detection.get("id", 0), bbox={
@@ -1152,16 +1149,14 @@ class KalmanTrackedObject:
         return max(0.1, min(1.0, score))
 
     def apply_ego_compensation(self, dx, dy, dyaw):
-        # 1. 먼저 평행이동 보상
-        rel = np.array([self.pose_state[0] - dx,
-                        self.pose_state[1] - dy])
-        # 2. 그 다음 -dyaw만큼 회전
-        R = np.array([[np.cos(-dyaw), -np.sin(-dyaw)],
-                    [np.sin(-dyaw),  np.cos(-dyaw)]])
-        rel_new = R @ rel
-        self.pose_state[0] = rel_new[0]
-        self.pose_state[1] = rel_new[1]
-        # 3. yaw도 반대로 보상
+        cos_yaw = np.cos(-dyaw)
+        sin_yaw = np.sin(-dyaw)
+
+        rel_x = self.pose_state[0]
+        rel_y = self.pose_state[1]
+
+        self.pose_state[0] = cos_yaw * rel_x - sin_yaw * rel_y - dx
+        self.pose_state[1] = sin_yaw * rel_x + cos_yaw * rel_y - dy
         self.yaw_state[0] -= dyaw
         self.yaw_state[0] = np.arctan2(np.sin(self.yaw_state[0]), np.cos(self.yaw_state[0]))
 
@@ -1330,10 +1325,14 @@ class KalmanMultiObjectTracker:
                 t.missed_count += 1
 
         # 7) Soft-delete 및 삭제 조건 판단
+        MAX_EXTRA_MISSES_FOR_DELETE = 10
         for t in self.tracks:
-            # 매칭 실패시 바로 OBSCURED로 전환
-            if t.missed_count > t.max_missed:
-                t.status_flag = TrackState.OBSCURED
+            if t.status_flag == TrackState.CONFIRMED:
+                if t.missed_count > t.max_missed + MAX_EXTRA_MISSES_FOR_DELETE:
+                    t.status_flag = TrackState.OBSCURED
+            else:
+                if t.missed_count > t.max_missed:
+                    t.status_flag = TrackState.OBSCURED
 
         # 9) 오래된 OBSCURED 트랙 제거
         self.tracks = [
@@ -1419,6 +1418,7 @@ class MCTrackTrackerNode:
         # === [A] 타이머들 초기화 ===
         self.tracking_timer = rospy.Timer(rospy.Duration(0.05), self.tracking_publish_callback)  # 기존 퍼블리시 루프
         self.marker_timer   = rospy.Timer(rospy.Duration(0.05), self.visualization_timer_callback)  # RViz 마커용 루프
+        # self.predict_timer  = rospy.Timer(rospy.Duration(0.1), self.tracker_loop)  # ✅ 트래커 예측 루프 (10Hz)
 
         self.last_predict_time = None  # ✅ 트래커 루프용 시간 변수
 
@@ -1459,7 +1459,10 @@ class MCTrackTrackerNode:
         self.ego_yaw         = 0.0
         self.last_time_stamp = None
 
+        self.predict_timer = rospy.Timer(rospy.Duration(0.05), self.tracker_loop)  # 20Hz 루프 추가
+        
         # ✅ [여기] === 마지막에 같이 넣어주세요 ===
+        self.last_predict_stamp = None
         self.last_detection_stamp = None
 
         rospy.loginfo("MCTrackTrackerNode 초기화 완료.")
@@ -1511,8 +1514,8 @@ class MCTrackTrackerNode:
 
             last_time = curr_time
 
-            # rospy.loginfo(f"[EgoCompInt] dt={dt:.3f}s yaw={np.degrees(yaw):.1f}° "
-            #             f"dx={dx:.3f}, dy={dy:.3f}, dyaw={dyaw:.3f} rad")
+            rospy.loginfo(f"[EgoCompInt] dt={dt:.3f}s yaw={np.degrees(yaw):.1f}° "
+                        f"dx={dx:.3f}, dy={dy:.3f}, dyaw={dyaw:.3f} rad")
 
         return dx_total, dy_total, dyaw_total
     
@@ -1546,6 +1549,17 @@ class MCTrackTrackerNode:
 
         self.tracking_pub.publish(ta)
 
+    def tracker_loop(self, event):
+        if self.last_predict_stamp is None or self.last_detection_stamp is None:
+            return  # 아직 detection이 안 들어오면 skip
+
+        dt = (self.last_detection_stamp - self.last_predict_stamp).to_sec()
+        if dt <= 0:
+            return
+
+        self.tracker.predict(dt)
+        self.last_predict_stamp = self.last_detection_stamp
+
 
     def delete_all_markers(self):
         for i, marker in reversed(list(enumerate(self.marker_array.markers))):
@@ -1562,19 +1576,14 @@ class MCTrackTrackerNode:
             # [1] 타임스탬프 계산 및 자차 상태 추정
             timestamp_sec = msg.header.stamp.to_sec()
 
-            # [A] dt 계산: detection 간격 기준 (첫 프레임 0.1)
-            if not hasattr(self, 'last_detection_time'):
-                self.last_detection_time = None
-            if self.last_detection_time is None:
-                dt = 0.1
-            else:
-                dt = timestamp_sec - self.last_detection_time
-                if dt <= 0:
-                    dt = 0.1
-            rospy.loginfo(f"[DT_CHECK] dt={dt:.4f}s  timestamp={timestamp_sec:.4f}")        
-            self.last_detection_time = timestamp_sec
+            # ✅ 최초 초기화: predict 타이머가 쓸 수 있게!
+            if self.last_predict_stamp is None:
+                self.last_predict_stamp = msg.header.stamp
 
-            # [B] 자차 상태 추정 (속도 + 요레이트)
+            # ✅ 매 detection마다 최신으로 갱신!
+            self.last_detection_stamp = msg.header.stamp
+
+            # ✅ 자차 상태 추정 (속도 + 요레이트)
             nearest_chassis_msg = self.get_nearest_chassis(timestamp_sec)
             if nearest_chassis_msg:
                 avg_speed_kph = (
@@ -1584,26 +1593,49 @@ class MCTrackTrackerNode:
                 self.ego_vel = avg_speed_kph / 3.6
                 self.ego_yaw_rate = nearest_chassis_msg.cr_yrs_yr * np.pi / 180.0
 
-            self.frame_idx += 1
+            # [2] 시간 간격 계산 (dt)
+            if self.last_time_stamp is None:
+                dt = 0.0
+            else:
+                dt = (msg.header.stamp - self.last_time_stamp).to_sec()
+            self.last_time_stamp = msg.header.stamp
 
-            # [C] 동일 타임스탬프 중복 수신 방지
+            self.frame_idx += 1
+            # rospy.loginfo(f"[Tracker] Frame {self.frame_idx} (dt={dt:.3f}s)")
+
+            # [3] 동일 타임스탬프 중복 수신 방지
             if hasattr(self, "last_timestamp_sec") and abs(timestamp_sec - self.last_timestamp_sec) < 1e-6:
                 rospy.logwarn(f"[WARN] 동일한 timestamp가 반복 수신됨: {timestamp_sec:.6f}")
             self.last_timestamp_sec = timestamp_sec
 
-            # [2] Detection 메시지 → 내부 dict 포맷으로 변환 + 필터링
+            # [4] Detection 메시지 → 내부 dict 포맷으로 변환 + 필터링
             VALID_CLASSES = set(CLASS_CONFIG.keys())
             if self.is_fusion_mode:
                 self.class_min_confidence = {
-                    1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.02,
-                    6: 0.08, 7: 0.02, 8: 0.02, 9: 0.02, 10: 0.01
-                }  # BEVFusion
+                    1: 0.03,   # car
+                    2: 0.03,   # truck
+                    3: 0.03,   # bus
+                    4: 0.03,   # trailer
+                    5: 0.02,   # construction vehicle
+                    6: 0.08,   # pedestrian 
+                    7: 0.02,   # motorcycle
+                    8: 0.02,   # bicycle
+                    9: 0.02,   # barrier
+                    10: 0.01   # traffic cone 
+                }# BEVFusion
             else:
                 self.class_min_confidence = {
-                    1: 0.14, 2: 0.08, 3: 0.08, 4: 0.08, 5: 0.12,
-                    6: 0.02, 7: 0.1, 8: 0.02, 9: 0.15, 10: 0.02
-                }  # LiDAR-only
-
+                    1: 0.14,  # Car
+                    2: 0.08,  # Truck
+                    3: 0.08,  # Bus
+                    4: 0.08,  # Trailer
+                    5: 0.12,  # ConstructionVehicle
+                    6: 0.02,  # Pedestrian
+                    7: 0.1,  # Motorcycle 
+                    8: 0.02,  # Bicycle
+                    9: 0.15,  # Barrier
+                    10: 0.02, # TrafficCone
+                } # LiDAR-only  
             detections = []
             for i, obj in enumerate(msg.objects):
                 label_str = obj.label.strip().lower()
@@ -1622,25 +1654,28 @@ class MCTrackTrackerNode:
                     "confidence": obj.score
                 })
 
-            # [3] Ego-motion 보상 (chassis 데이터 있을 때만)
+            # [5] Ego-motion 보상만 수행 (predict는 별도 루프에서 처리됨)
             if dt > 0:
                 t1 = timestamp_sec
                 t0 = t1 - dt
                 samples = self.get_chassis_samples_in_range(t0, t1)
+
                 if samples:
+                    # ✅ chassis 데이터를 기반으로 정확한 적분 방식 보상 적용
                     dx, dy, dyaw = self.integrate_ego_motion(samples, t0, t1, self.ego_yaw)
                     self.tracker.apply_ego_compensation_to_all(dx, dy, dyaw)
                 else:
+                    # ✅ chassis 데이터가 없으면 보상 생략 (추론 왜곡 방지)
                     rospy.logwarn("[EgoComp] No chassis samples available — skipping ego-motion compensation")
             else:
                 rospy.logwarn(f"Skipping ego compensation for dt={dt:.3f}s")
 
-            # [4] === 정석 Kalman: detection마다 predict + update 한 번에 수행 ===
-            self.tracker.predict(dt)
+            # [6] 트래커 업데이트만 수행 (예측은 타이머 루프에서 수행됨)
             self.tracker.update(detections, dt)
 
-            # [5] 추적 결과를 메시지로 변환
+            # [7] 추적 결과를 변환하여 메시지로 구성
             tracks = self.tracker.get_tracks()
+            # rospy.loginfo(f"[Tracker] Published Tracks: {len(tracks)}")
 
             ta = PfGMFATrackArray(header=msg.header)
             for t in tracks:
@@ -1653,13 +1688,13 @@ class MCTrackTrackerNode:
                 m.id = int(t["id"])
                 m.obj_class = t["type"]
                 ta.tracks.append(m)
-            self.tracking_pub.publish(ta)
 
-            # [6] RViz 마커 구성 및 삭제/갱신 처리
+            # [8] RViz 마커 구성 및 삭제/갱신 처리
             vis_header = Header(frame_id="vehicle", stamp=msg.header.stamp)
             current_ids = set(t["id"] for t in tracks)
             deleted_ids = getattr(self, "prev_track_ids", set()) - current_ids
             self.marker_array = MarkerArray()
+
             for tid in deleted_ids:
                 for ns, base_id in [("track_meshes", 0), ("track_ids", 1000), ("track_arrows", 2000)]:
                     m = Marker()
@@ -1668,16 +1703,21 @@ class MCTrackTrackerNode:
                     m.id = base_id + tid
                     m.action = Marker.DELETE
                     self.marker_array.markers.append(m)
+
             for t in tracks:
                 m1 = create_single_track_marker(t, vis_header, t["id"])
                 self.marker_array.markers.append(m1)
+
                 m2 = create_text_marker(t, vis_header, 1000 + t["id"])
                 if m2 is not None:
                     self.marker_array.markers.append(m2)
+
                 m3 = create_arrow_marker(t, vis_header, 2000 + t["id"])
                 self.marker_array.markers.append(m3)
+
             ego_marker = create_ego_marker(vis_header.stamp)
             self.marker_array.markers.append(ego_marker)
+
             self.vis_pub.publish(self.marker_array)
             self.prev_track_ids = current_ids
 
